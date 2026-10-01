@@ -33,6 +33,7 @@ from grouppig.expression.generator.context import (
     render_profile_block,
     render_session_block,
     render_threads_block,
+    split_fence,
     truncate_block,
 )
 from grouppig.expression.persona import profile as profile_module
@@ -284,7 +285,12 @@ def test_render_session_block_uses_title_and_keywords():
 
 def test_render_threads_block_one_line_per_thread():
     block = render_threads_block([thread(), thread(thread_id="t2", title="晚饭")])
-    assert len(block.splitlines()) == 2
+    # 聊天线是群聊派生数据，整块带围栏；「每条线一行」数的是围栏正文，不是标记行。
+    fenced = split_fence(block)
+    assert fenced is not None, "群聊派生的块必须带围栏"
+    head, body, tail = fenced
+    assert len(body.splitlines()) == 2
+    assert head.startswith("-----BEGIN UNTRUSTED DATA") and tail.startswith("-----END UNTRUSTED DATA")
 
 
 def test_render_profile_block_reads_speaking_style():

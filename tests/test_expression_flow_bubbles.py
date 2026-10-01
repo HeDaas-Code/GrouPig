@@ -24,7 +24,14 @@ class RecordingAdapter:
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
 
-    async def send_group_message(self, group_id: Any, message: Any, raise_on_error: bool = False) -> dict[str, Any]:
+    async def send_group_message(
+        self,
+        group_id: Any,
+        message: Any,
+        *,
+        auto_escape: bool = False,
+        raise_on_error: bool = False,
+    ) -> dict[str, Any]:
         segments = [dict(seg) for seg in message]
         self.sent.append({"group_id": group_id, "segments": segments})
         return {

@@ -10,6 +10,11 @@
 6. 顺手刷新 :class:`~grouppig.social.profile.manager.lookup.ProfileLookup` 的特征索引
    （纯进程内优化，不是契约依赖）。
 
+事实的冲突消解在 memory 侧执行（见 ``grouppig.memory.profile-store.dao`` 的模块说明：
+分层顺序与 ``core-acyclic`` 都不允许这里反向调用 ``rpc:profile.conflict``）。
+本叶子只负责把开关传下去：``arbitrate=True``（默认）走可信度仲裁，
+``arbitrate=False`` 是显式的「盲顶」回退，供确实需要旧行为的调用方使用。
+
 回滚语义：``rollback(user_id, version)`` 把旧快照作为**新版本**再写一次（不删除历史），
 与设计的「保留旧版本 + 支持回滚与审计」一致。
 
@@ -131,8 +136,13 @@ class ProfileVersioning:
         group_id: int = 0,
         merge: bool = True,
         force: bool = False,
+        arbitrate: bool = True,
     ) -> dict[str, Any]:
-        """更新档案（版本化 + 发事件）。返回结果里 ``applied=False`` 表示被乐观锁挡下。"""
+        """更新档案（版本化 + 发事件）。返回结果里 ``applied=False`` 表示被乐观锁挡下。
+
+        ``arbitrate=False`` 让事实落盘退回「盲顶」（修复前的行为）；默认按来源可信度消解冲突，
+        落败的新事实记 ``status="conflict"`` 而不生效，计入返回值的 ``conflicts``。
+        """
 
         if user_id is None:
             raise ValueError("rpc:profile.update 需要 user_id")
@@ -182,10 +192,12 @@ class ProfileVersioning:
             profile=incoming,
             facts=normalized_facts or None,
             merge=merge,
+            arbitrate=arbitrate,
         )
         profile = (response or {}).get("profile") if isinstance(response, Mapping) else None
         written = int((response or {}).get("facts") or 0) if isinstance(response, Mapping) else 0
         superseded = int((response or {}).get("superseded") or 0) if isinstance(response, Mapping) else 0
+        conflicts = int((response or {}).get("conflicts") or 0) if isinstance(response, Mapping) else 0
 
         version = int((profile or incoming).get("version") or (previous_version or 0) + 1)
         changed = changed_fields(old_profile, profile or incoming)
@@ -230,6 +242,7 @@ class ProfileVersioning:
             "changed": changed,
             "facts": written,
             "superseded": superseded,
+            "conflicts": conflicts,
             "facts_written": len(normalized_facts),
             "event": event,
         }
@@ -327,6 +340,7 @@ def make_handlers(ctx: SocialContext, versioning: ProfileVersioning) -> dict[str
         group_id: int = 0,
         merge: bool = True,
         force: bool = False,
+        arbitrate: bool = True,
         **fields: Any,
     ) -> dict[str, Any]:
         merged_patch = {**(patch or {}), **fields}
@@ -341,6 +355,7 @@ def make_handlers(ctx: SocialContext, versioning: ProfileVersioning) -> dict[str
             group_id=group_id,
             merge=merge,
             force=force,
+            arbitrate=arbitrate,
         )
 
     return {RPC_UPDATE: profile_update}

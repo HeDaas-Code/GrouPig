@@ -202,11 +202,16 @@ class InterruptScorer:
         cooldown = dict(cooldown or {})
         contents = [messages_module.text_of(row) for row in rows]
 
+        # 被点名是**别人对我**的动作（上游 ``QQEvent.at_self``：@ 里含我的 QQ），
+        # 不是我出现在窗口里。旧实现把 ``sender_id == self_id`` 当成「被点名」，
+        # 于是**我自己刚发的那条消息**就成了 0.9 的点名信号：刚说完话又被抬到
+        # mention 地板（0.75）推着再开口。``drop_bot`` 默认 false，我方消息确实还在窗口里。
         at_self = any(row.get("at_self") for row in rows)
-        mentions = [int(row.get("sender_id", 0) or 0) for row in rows]
-        self_mentioned = bool(self_id) and any(self_id == sender for sender in mentions)
+        senders = [int(row.get("sender_id", 0) or 0) for row in rows]
+        self_in_window = bool(self_id) and any(self_id == sender for sender in senders)
+        self_mentioned = bool(at_self)
         replies_to_self = bool(self_id) and any(_reply_target(row) == self_id for row in rows)
-        mentioned = 1.0 if at_self else (0.9 if (self_mentioned or replies_to_self) else 0.0)
+        mentioned = 1.0 if self_mentioned else (0.9 if replies_to_self else 0.0)
 
         focus = float(features.get("topic_focus") or features.get("concentration") or 0.0)
         keywords = {str(item[0]) for item in features.get("keywords") or () if isinstance(item, (list, tuple)) and item}
@@ -282,6 +287,8 @@ class InterruptScorer:
                 "message_count": len(rows),
                 "at_self": at_self,
                 "self_mentioned": self_mentioned,
+                # 「我在窗口里说过话」——诊断用，**不参与打分**（它不是被点名）
+                "self_in_window": self_in_window,
                 "replies_to_self": replies_to_self,
                 "familiar_topics": familiar_terms,
                 "learned_terms": len(learned_terms),

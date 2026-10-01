@@ -88,7 +88,7 @@ message_id, raw_message, text, command_text, segments, sender, at_self, known
   text | content | message（任选其一，字符串或消息段数组）
   group_id 或 user_id（至少一个）
   reply_to、at（提及 QQ 号或列表）、emoji、source（默认 "flow"）、
-  drop_if_limited、max_wait、auto_escape、record
+  drop_if_limited、max_wait、auto_escape、record、bubbles、bubble_delay、batch、force
   ```
 
 * `rpc:onebot.send`：`action=` 直发底层动作（如 `delete_msg`，`params` 原样透传）；
@@ -104,8 +104,13 @@ message_id, raw_message, text, command_text, segments, sender, at_self, known
 
   ```
   { group_id, user_id, message_id, message_ids, text, segments,
-    raw_message, self: true, role: "assistant", source, ts }
+    raw_message, self: true, role: "self", source, ts }
   ```
+
+  `role` 是 **`"self"`**，不是 `"assistant"`：`memory` 的 `chat_messages.role`
+  只认 `member` / `self` / `system`，写 `"assistant"` 会被 `normalize_message`
+  静默降级成 `member` —— 机器人自己的发言就和群友的混在一起了，
+  下游的画像与复盘会把它当成群友说的话。
 
 ## 4. 配置键（`config/grouppig.toml`，全部可选，缺省用代码内默认值）
 

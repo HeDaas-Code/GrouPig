@@ -1,8 +1,22 @@
 """grouppig.memory.profile-store.dao —— 档案 DAO（``rpc:profile-store.get`` / ``rpc:profile-store.put``）。
 
 * ``get`` —— 读档案主表（可带生效事实）；
-* ``put`` —— 写档案主表与事实表：JSON 字段做合并（不丢历史信息），
-  同一 ``(user_id, fact_key)`` 的新事实顶替旧事实（旧事实转 ``superseded``，版本号 +1）。
+* ``put`` —— 写档案主表与事实表：JSON 字段做合并（不丢历史信息）；
+  同一 ``(user_id, fact_key)`` 的新事实**先消解冲突再决定是否顶替**：
+  综合分领先不足 ``margin`` 或直接落败的新事实记 ``status="conflict"``（不生效），
+  旧事实继续 ``active``；真正被顶替的旧事实才转 ``superseded``（版本号 +1）。
+
+为什么仲裁口径放在 memory 侧（而不是去调用 social 的 ``rpc:profile.conflict``）：
+
+* 分层顺序是 infra → memory → perception → session → social → …，memory 反向依赖 social 是违规边；
+* 设计树里 ``conflict-resolver → versioning``（``rpc:profile.conflict`` → ``rpc:profile.update``）
+  已经存在，社交侧再反过来调用会成环，违反 ``policy.yml`` 的 ``core-acyclic``；
+* 全部写入（``rpc:profile.update`` 与直接 ``rpc:profile-store.put``）都汇到本叶子，
+  只有放在这里才能一次护住所有写路径。
+
+因此本模块与 :mod:`grouppig.social.profile.extractor.conflict_resolver` 共用同一套口径常量，
+由 ``tests/test_profile_conflict_arbitration.py::test_memory_policy_matches_social_resolver``
+把两份常量锁成一致（跨树 import 会破坏「跨树只走注册表」的既有约定，故用测试而非 import 对齐）。
 
 设计依赖：``rpc:profile-store.put`` → ``mysql:member_profiles``（写入档案表）。
 
@@ -13,6 +27,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import func, select, update
@@ -36,6 +51,37 @@ FACT_FIELDS = tuple(c.name for c in profile_facts.c)
 #: 合并策略：列表取并集，字典浅合并。
 LIST_FIELDS = ("aliases", "tags", "interests", "group_ids")
 DICT_FIELDS = ("speaking_style", "stance")
+
+#: 来源可信度（与 ``rpc:profile.conflict`` 同口径）。
+SOURCE_CREDIBILITY: dict[str, float] = {
+    "manual": 1.0,
+    "extractor": 0.8,
+    "llm": 0.7,
+    "inferred": 0.5,
+}
+
+#: 白名单外的来源默认可信度。
+DEFAULT_CREDIBILITY = 0.6
+
+#: 时间衰减半衰期（天）。
+DEFAULT_HALF_LIFE_DAYS = 90.0
+
+#: 分差小于该值视为未消解（保留旧值，避免抖动写坏档案）。
+DEFAULT_MARGIN = 0.05
+
+#: 消解动作（复用 ``rpc:profile.conflict`` 的动作词表）。
+ACTION_UPDATE = "update"
+ACTION_CONFLICT = "conflict"
+
+
+@dataclass(frozen=True)
+class CollisionDecision:
+    """同键异值的消解结论。"""
+
+    action: str
+    gap: float
+    current_score: float
+    incoming_score: float
 
 
 def normalize_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
@@ -118,6 +164,59 @@ def _union(left: Any, right: Any) -> list[Any]:
     return out
 
 
+def credibility_of(source: Any) -> float:
+    """来源可信度。"""
+
+    return SOURCE_CREDIBILITY.get(str(source or "").strip(), DEFAULT_CREDIBILITY)
+
+
+def recency_of(observed_at: Any, *, now: float, half_life_days: float = DEFAULT_HALF_LIFE_DAYS) -> float:
+    """时间衰减权重（越新越接近 1）。"""
+
+    stamp = float(observed_at or 0.0)
+    if not stamp or half_life_days <= 0:
+        return 1.0
+    age_days = max(0.0, (float(now) - stamp) / 86400.0)
+    return 0.5 ** (age_days / float(half_life_days))
+
+
+def fact_score(fact: Mapping[str, Any], *, now: float, half_life_days: float = DEFAULT_HALF_LIFE_DAYS) -> float:
+    """综合分：来源可信度 × 置信度 × 时间衰减。"""
+
+    return (
+        credibility_of(fact.get("source"))
+        * float(fact.get("confidence") or 0.0)
+        * recency_of(fact.get("observed_at"), now=now, half_life_days=half_life_days)
+    )
+
+
+def resolve_collision(
+    current: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+    *,
+    margin: float = DEFAULT_MARGIN,
+    half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
+) -> CollisionDecision:
+    """同键异值：新事实领先 ``margin`` 以上才 ``update``，否则 ``conflict``（旧值不动）。
+
+    ``now`` 取两条事实里**较新的观察时刻**：DAO 是没有时钟的存储叶子，
+    若拿挂钟做绝对衰减，回填/历史数据的两条分数会一起被压到 0，
+    于是任何差异都变成「未消解」；以较新观察为基准等价于「旧证据相对新证据衰减」，
+    与 ``rpc:profile.conflict`` 是同一个式子，只是参考点更稳。
+    """
+
+    now = max(float(current.get("observed_at") or 0.0), float(incoming.get("observed_at") or 0.0))
+    current_score = fact_score(current, now=now, half_life_days=half_life_days)
+    incoming_score = fact_score(incoming, now=now, half_life_days=half_life_days)
+    gap = incoming_score - current_score
+    return CollisionDecision(
+        action=ACTION_UPDATE if gap >= float(margin) else ACTION_CONFLICT,
+        gap=gap,
+        current_score=current_score,
+        incoming_score=incoming_score,
+    )
+
+
 class ProfileDAO:
     """群友档案与档案事实的读写。"""
 
@@ -131,8 +230,12 @@ class ProfileDAO:
         *,
         facts: Sequence[Mapping[str, Any]] | None = None,
         merge: bool = True,
+        arbitrate: bool = True,
     ) -> dict[str, Any]:
-        """写入档案（默认与既有档案合并）并落事实；返回 ``{"profile", "facts", "superseded"}``。"""
+        """写入档案（默认与既有档案合并）并落事实；返回 ``{"profile", "facts", "superseded", "conflicts"}``。
+
+        ``arbitrate=False`` 是显式的「盲顶」开关（修复前的行为），默认按可信度消解冲突。
+        """
 
         incoming = normalize_profile(profile)
         existing = await self._raw_profile(incoming["user_id"])
@@ -145,11 +248,12 @@ class ProfileDAO:
         if row is None:  # pragma: no cover
             raise StoreError(f"profile-store.put 后读回失败：{incoming['user_id']}")
 
-        result = {"facts": 0, "superseded": 0}
+        result = {"facts": 0, "superseded": 0, "conflicts": 0}
         if facts:
             result = await self.put_facts(
                 [{**dict(fact), "user_id": incoming["user_id"]} for fact in facts],
                 supersede=True,
+                arbitrate=arbitrate,
             )
         active = await self.count_facts(incoming["user_id"], status="active")
         refreshed = await self._raw_profile(incoming["user_id"]) or row
@@ -160,41 +264,70 @@ class ProfileDAO:
                 .values(facts_count=active)
             )
             refreshed = await self._raw_profile(incoming["user_id"]) or refreshed
-        return {"profile": refreshed, "facts": result["facts"], "superseded": result["superseded"]}
+        return {
+            "profile": refreshed,
+            "facts": result["facts"],
+            "superseded": result["superseded"],
+            "conflicts": result["conflicts"],
+        }
 
-    async def put_facts(self, facts: Sequence[Mapping[str, Any]], *, supersede: bool = True) -> dict[str, Any]:
-        """落一批事实：同键同值刷新置信度，同键异值顶替（旧事实转 ``superseded``）。"""
+    async def put_facts(
+        self,
+        facts: Sequence[Mapping[str, Any]],
+        *,
+        supersede: bool = True,
+        arbitrate: bool = True,
+    ) -> dict[str, Any]:
+        """落一批事实：同键同值刷新置信度，同键异值**消解冲突后**再决定是否顶替。
+
+        * ``supersede=False`` —— 旧语义逐字不变：新事实记 ``conflict``，旧事实一行不动；
+        * ``arbitrate=False`` —— 显式「盲顶」开关（修复前的行为），供调用方主动选择；
+        * 默认（``supersede=True, arbitrate=True``）—— 综合分领先不足 ``margin`` 或落败的
+          新事实记 ``status="conflict"``（不生效），旧值继续 ``active``。
+        """
 
         written = 0
         superseded = 0
+        conflicts = 0
         for fact in facts:
             payload = normalize_fact(fact)
-            current = await self._current_fact(payload["user_id"], payload["fact_key"])
-            if current is None:
+            latest = await self._latest_fact(payload["user_id"], payload["fact_key"])
+            if latest is None:
                 await self.db.upsert(profile_facts, payload, index_elements=("user_id", "fact_key", "version"))
                 written += 1
                 continue
-            if str(current.get("fact_value")) == payload["fact_value"]:
+            # 比较基准是「生效事实」：冲突行的版本号更高，但它不是档案当前的真相；
+            # 只有没有生效行（历史遗留数据）时才退化成最新一行。
+            baseline = latest
+            if str(latest.get("status")) != "active":
+                baseline = await self._active_fact(payload["user_id"], payload["fact_key"]) or latest
+            if str(baseline.get("fact_value")) == payload["fact_value"]:
                 await self.db.execute(
                     profile_facts.update()
-                    .where(profile_facts.c.id == current["id"])
+                    .where(profile_facts.c.id == baseline["id"])
                     .values(
-                        confidence=max(float(current.get("confidence") or 0.0), payload["confidence"]),
-                        evidence=payload["evidence"] or current.get("evidence") or "",
+                        confidence=max(float(baseline.get("confidence") or 0.0), payload["confidence"]),
+                        evidence=payload["evidence"] or baseline.get("evidence") or "",
                         observed_at=payload["observed_at"],
                     )
                 )
                 continue
-            payload["version"] = int(current.get("version") or 1) + 1
-            payload["status"] = "active" if supersede else "conflict"
+            payload["version"] = int(latest.get("version") or 1) + 1
+            # 落败（或调用方显式要求不顶替）的新事实仍然落库，但记 conflict：既不生效、也不丢证据。
+            if not supersede or (arbitrate and resolve_collision(baseline, payload).action == ACTION_CONFLICT):
+                payload["status"] = "conflict"
+                await self.db.upsert(profile_facts, payload, index_elements=("user_id", "fact_key", "version"))
+                written += 1
+                conflicts += 1
+                continue
+            payload["status"] = "active"
             await self.db.upsert(profile_facts, payload, index_elements=("user_id", "fact_key", "version"))
             written += 1
-            if supersede:
-                await self.db.execute(
-                    profile_facts.update().where(profile_facts.c.id == current["id"]).values(status="superseded")
-                )
-                superseded += 1
-        return {"facts": written, "superseded": superseded}
+            await self.db.execute(
+                profile_facts.update().where(profile_facts.c.id == baseline["id"]).values(status="superseded")
+            )
+            superseded += 1
+        return {"facts": written, "superseded": superseded, "conflicts": conflicts}
 
     # ---- 读 ------------------------------------------------------------
     async def get(
@@ -269,13 +402,26 @@ class ProfileDAO:
         statement = select(member_profiles).where(member_profiles.c.user_id == int(user_id))
         return await self.db.fetch_one(statement)
 
-    async def _current_fact(self, user_id: int, fact_key: str) -> dict[str, Any] | None:
+    async def _latest_fact(self, user_id: int, fact_key: str) -> dict[str, Any] | None:
+        """该键版本号最大的一行（任何状态），用于推进版本号。"""
+
+        statement = (
+            select(profile_facts)
+            .where(profile_facts.c.user_id == int(user_id), profile_facts.c.fact_key == fact_key)
+            .order_by(profile_facts.c.version.desc())
+            .limit(1)
+        )
+        return await self.db.fetch_one(statement)
+
+    async def _active_fact(self, user_id: int, fact_key: str) -> dict[str, Any] | None:
+        """该键当前生效的一行（冲突行的版本号可能更高，但生效行才是比较基准）。"""
+
         statement = (
             select(profile_facts)
             .where(
                 profile_facts.c.user_id == int(user_id),
                 profile_facts.c.fact_key == fact_key,
-                profile_facts.c.status.in_(["active", "conflict"]),
+                profile_facts.c.status == "active",
             )
             .order_by(profile_facts.c.version.desc())
             .limit(1)
@@ -284,12 +430,23 @@ class ProfileDAO:
 
 
 __all__ = [
+    "ACTION_CONFLICT",
+    "ACTION_UPDATE",
+    "DEFAULT_CREDIBILITY",
+    "DEFAULT_HALF_LIFE_DAYS",
+    "DEFAULT_MARGIN",
     "DICT_FIELDS",
     "FACT_FIELDS",
     "LIST_FIELDS",
     "PROFILE_FIELDS",
+    "SOURCE_CREDIBILITY",
+    "CollisionDecision",
     "ProfileDAO",
+    "credibility_of",
+    "fact_score",
     "merge_profile",
     "normalize_fact",
     "normalize_profile",
+    "recency_of",
+    "resolve_collision",
 ]

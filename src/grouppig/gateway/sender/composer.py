@@ -425,6 +425,7 @@ class ReplyComposer:
         bubbles: Sequence[str] | str | None = None,
         bubble_delay: float | None = None,
         batch: str | None = None,
+        auto_escape: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """发送入口：总闸 → 节流 → 包装 → 逐条发送 → 记流水。
@@ -443,6 +444,12 @@ class ReplyComposer:
             source = str(reply.get("source", source) or source)
             if bubbles is None:
                 bubbles = reply.get("bubbles")
+            # ``auto_escape`` 在文档里是 ``send_reply(**payload)`` 的合法选项，但此前
+            # 谁都没把它传下去：``wrap`` 用 ``**_`` 把它静默吞掉，适配器那层
+            # ``send_group_msg(auto_escape=...)`` 永远拿到默认 False。
+            # 「文档承诺了、代码收下了、然后什么也没发生」比直接报错更难查。
+            if "auto_escape" in reply:
+                auto_escape = bool(reply["auto_escape"])
         if group_id is None and user_id is None:
             return self._result(ok=False, error="missing_target", reason="group_id/user_id 至少给一个")
 
@@ -461,6 +468,7 @@ class ReplyComposer:
                 max_wait=max_wait,
                 bubble_delay=bubble_delay,
                 batch=batch,
+                auto_escape=auto_escape,
                 wrap_kwargs=kwargs,
             )
 
@@ -519,9 +527,13 @@ class ReplyComposer:
         for chunk in composed.chunks:
             try:
                 if group_id is not None:
-                    result = await self.adapter.send_group_message(group_id, chunk, raise_on_error=False)
+                    result = await self.adapter.send_group_message(
+                        group_id, chunk, auto_escape=auto_escape, raise_on_error=False
+                    )
                 else:
-                    result = await self.adapter.send_private_message(user_id, chunk, raise_on_error=False)
+                    result = await self.adapter.send_private_message(
+                        user_id, chunk, auto_escape=auto_escape, raise_on_error=False
+                    )
             except Exception as exc:
                 self.stats.failures += 1
                 self.stats.last_error = f"{type(exc).__name__}: {exc}"
@@ -617,6 +629,7 @@ class ReplyComposer:
         max_wait: float | None,
         bubble_delay: float | None,
         batch: str | None,
+        auto_escape: bool,
         wrap_kwargs: Mapping[str, Any],
     ) -> dict[str, Any]:
         """把一条回复按气泡**分条**发出：逐条走完整发送路径，条与条之间按长度等待。
@@ -652,6 +665,7 @@ class ReplyComposer:
                 drop_if_limited=drop_if_limited,
                 max_wait=max_wait,
                 batch=batch_id,
+                auto_escape=auto_escape,
                 bubble_delay=0.0,
                 **wrap_kwargs,
             )

@@ -29,10 +29,22 @@ class RecordingAdapter:
 
     def __init__(self) -> None:
         self.sent: list[list[dict[str, Any]]] = []
+        # 真实 OneBotAdapter.send_group_message 一直有 auto_escape 形参；
+        # 替身此前漏了它，于是「composer 到底有没有把 auto_escape 传下去」这件事
+        # 在测试里根本不可观测。
+        self.auto_escape: list[bool] = []
 
-    async def send_group_message(self, group_id: Any, message: Any, raise_on_error: bool = False) -> dict[str, Any]:
+    async def send_group_message(
+        self,
+        group_id: Any,
+        message: Any,
+        *,
+        auto_escape: bool = False,
+        raise_on_error: bool = False,
+    ) -> dict[str, Any]:
         segments = [dict(seg) for seg in message]
         self.sent.append(segments)
+        self.auto_escape.append(bool(auto_escape))
         return {
             "ok": True,
             "action": "send_group_msg",
@@ -182,12 +194,20 @@ async def test_failure_stops_the_rest_of_the_bubbles():
     adapter, _ = make_composer()
     calls: list[str] = []
 
-    async def flaky(group_id: Any, message: Any, raise_on_error: bool = False) -> dict[str, Any]:
+    async def flaky(
+        group_id: Any,
+        message: Any,
+        *,
+        auto_escape: bool = False,
+        raise_on_error: bool = False,
+    ) -> dict[str, Any]:
         text = "".join(str(seg.get("data", {}).get("text", "")) for seg in message if seg.get("type") == "text")
         calls.append(text)
         if len(calls) == 2:
             return {"ok": False, "action": "send_group_msg", "status": "failed", "retcode": 100, "wording": "被禁言"}
-        return await RecordingAdapter.send_group_message(adapter, group_id, message, raise_on_error=raise_on_error)
+        return await RecordingAdapter.send_group_message(
+            adapter, group_id, message, auto_escape=auto_escape, raise_on_error=raise_on_error
+        )
 
     adapter.send_group_message = flaky  # type: ignore[method-assign]
     composer = ReplyComposer(adapter, emoji_pool=(), quote=False, auto_emoji=False, bubble_delay=0.0)
@@ -219,3 +239,43 @@ async def test_positional_text_payload_still_works():
     result = await composer.send_reply("直接给字符串", group_id=100)
     assert result["ok"] is True
     assert adapter.texts() == ["直接给字符串"]
+
+
+# ---- auto_escape：文档承诺过、代码收下了、但此前什么也没发生 ------------------
+async def test_auto_escape_reaches_the_adapter():
+    """``auto_escape`` 必须真的传到 OneBot。
+
+    它此前只出现在文档（``docs/GATEWAY.md`` 把它列为 ``send_reply(**payload)``
+    的合法选项）和适配器签名里，中间没人接：``wrap`` 用 ``**_`` 静默吞掉，
+    于是运维照文档传了 ``auto_escape=True``，得到的仍是未转义的原文。
+    """
+
+    adapter = RecordingAdapter()
+    composer = ReplyComposer(adapter, sleep=FakeSleep())
+
+    await composer.send_reply({"text": "喵", "group_id": 1, "auto_escape": True})
+
+    assert adapter.auto_escape == [True], "auto_escape 没被传到适配器"
+
+
+async def test_auto_escape_defaults_to_false_and_is_forwarded():
+    """不传时也必须显式传 False（而不是让适配器自己兜底）——两种情形都可观测。"""
+
+    adapter = RecordingAdapter()
+    composer = ReplyComposer(adapter, sleep=FakeSleep())
+
+    await composer.send_reply({"text": "喵", "group_id": 1})
+
+    assert adapter.auto_escape == [False]
+
+
+async def test_auto_escape_applies_to_every_bubble():
+    """多气泡：每条都要带上同一个 auto_escape，不能只有第一条生效。"""
+
+    adapter = RecordingAdapter()
+    composer = ReplyComposer(adapter, sleep=FakeSleep())
+
+    await composer.send_reply({"text": "一\n二\n三", "bubbles": ["一", "二", "三"], "group_id": 1, "auto_escape": True})
+
+    assert len(adapter.sent) == 3
+    assert adapter.auto_escape == [True, True, True]

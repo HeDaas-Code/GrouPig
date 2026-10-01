@@ -12,6 +12,8 @@
 打分（确定性、可单测）：``confidence = 0.45*cohesion + 0.30*support + 0.25*recency``，
 其中 cohesion = 候选关键词与消息窗关键词的 Jaccard，support = 消息条数饱和度，
 recency = 末条消息的时间衰减；随后按最高分归一（top = 原始分，其余为相对分）。
+``rpc:topic.detect`` 对外报的 ``confidence`` 是**原始分**（与 ``DEFAULT_THRESHOLD`` 同一把尺），
+归一后的相对分另放在 ``relative_confidence``。
 
 设计：``grouppig.session.topic.detector.ranker``（叶子模块）。
 """
@@ -31,6 +33,7 @@ from grouppig.session.runtime.messages import (
     recency_factor,
     snippet,
     texts_of,
+    tokenize,
 )
 
 #: normify 模块 id。
@@ -58,22 +61,46 @@ WEIGHT_RECENCY = 0.25
 HALF_LIFE = 1800.0
 SUPPORT_SATURATION = 12.0
 
-#: 「新消息」与「当前会话话题」的归并门槛（共享关键词个数 + 重叠系数）。
+#: 「新消息」与「当前会话话题」的归并门槛（共享关键词个数 + 重叠系数 + 复现）。
 #:
 #: 同一段对话里措辞会一直变（「周末一起去爬山吧」→「爬山好啊我也想去爬山」→
 #: 「那就周六早上八点集合去爬山」），候选短语因此每条都不同、``topic_id`` 也跟着变，
 #: 于是每条消息都判 changed 并开新会话 —— 会话被切成 1~2 条消息的碎片，归档 / 反思 /
 #: 聊天线全部作用在碎片上。
 #:
-#: 判「还是同一件事」用的信号是**新消息与当前会话话题的共享实词**：
-#: 爬山那段依次共享 2 / 2 / 1 个词（重叠系数 0.4 / 0.2 / 0.125），而真的换到打游戏时共享 0 个词。
-#: 两个条件同时满足才归并：至少共享 ``MERGE_MIN_SHARED`` 个词，且重叠系数 ≥ ``MERGE_THRESHOLD``
-#: （重叠系数 = 共享词数 / 较短一侧的词数，抵消「会话关键词攒到 10 个、单条消息只有 4 个」的长度差）。
-#: 只看「共享 ≥1 个词」会被一个通用词（如「一起」）骗到，只看系数会被短消息放大，所以两个都要。
+#: 判「还是同一件事」用的信号是**新消息与当前会话话题的共享实词**。
+#:
+#: **为什么光看「共享个数 + 重叠系数」不够（旧版就是这个洞）**：两侧词表都由
+#: ``extract_keywords(top=10)`` 截断，于是 ``min(len) ≤ 10``，``shared ≥ 1`` 必然推出
+#: ``overlap = shared / min(len) ≥ 0.1`` —— 系数这一项在 ``MERGE_THRESHOLD = 0.1`` 下
+#: 数学上不可能否决任何东西，判据退化成「沾到一个共同词就归并」。中文群聊里
+#: 「一起 / 起去」这类词几乎每条消息都有：爬山会话碰上「我们一起去打游戏吧」共享
+#: 「一起 / 起去」两个词、系数 0.333；「一起吃饭吗」共享「一起」、系数 0.25 —— 两条都被
+#: 并进爬山会话，``changed`` 恒为 ``False``，``kafka:grouppig.topic.changed`` 一次都不发，
+#: 一个会话 / 聊天线 / 反思单元横跨两个不相干的话题。
+#: 把系数抬到 0.2 只补住「两条 10 词词表只共享 1 个词」这一种情形（1/10 = 0.1 < 0.2），
+#: 对上面两例无效（0.333 / 0.25 都过线）；而且会误伤真正的续聊 —— 实测同一话题的续聊有
+#: 1/6 落在 0.167（「爬山带什么装备好」→「爬山要不要带头灯」，只共享「爬山」、短边 6 个词），
+#: 抬阈值等于拿「短边有几个词」当运气。所以系数保持 0.1 只做**下限**（调用方仍可用
+#: ``merge_threshold`` 收紧），真正的判别力来自下面的复现条件。
+#:
+#: **真正的判别力：共享词必须「复现」。** 说明「还是同一件事」的不是「共享了词」，而是
+#: **共享的词在当前会话里反复出现**：爬山那段每一步都共享「爬山」（4 条会话消息里出现
+#: 4 次，第 3 步甚至只共享它一个词），而误归并那两例共享的「一起 / 起去」只出现在会话
+#: 的第一条消息里 —— 那是擦边词，不是这段话题的核心。
+#: 这也正是「按语料稀有度给共享词加权」的离线可测版本：这里的语料就是当前会话自己的消息，
+#: 「在几条消息里出现过」= 文档频次，无需外部语料库。
+#: 会话只有 0~1 条消息时词频无从谈起（第一条消息的词表里每个词都只出现一次），此时退回
+#: 「窗口内复现」，窗口里也只出现一次的孤词同样不算证据。会话消息靠 ``message_ids`` 在窗口里
+#: 定位（``on_message`` 每次都把「最近窗口 + 本条」一起递进来），拿不到 id 时退而用
+#: 「窗口里除本条以外的消息」当代理。
 MERGE_THRESHOLD = 0.1
 
 #: 归并要求的最少共享关键词个数。
 MERGE_MIN_SHARED = 1
+
+#: 共享词要算「复现证据」，至少得在当前会话的这么多条消息里出现过。
+MERGE_MIN_REPEAT = 2
 
 
 def keyword_overlap(left: Sequence[str], right: Sequence[str]) -> tuple[int, float]:
@@ -98,6 +125,29 @@ def topic_id_for(phrase: str, *, group_id: int = 0) -> str:
     text = " ".join(str(phrase or "").split())
     digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]  # noqa: S324 - 稳定 id，非安全用途
     return f"topic-{int(group_id or 0)}-{digest}"
+
+
+def recurring_keywords(
+    texts: Sequence[str],
+    keywords: Sequence[str],
+    *,
+    min_messages: int = MERGE_MIN_REPEAT,
+) -> list[str]:
+    """``keywords`` 里在这批 ``texts`` 中**复现**的那些（出现在 ≥ ``min_messages`` 条消息里）。
+
+    用「文档频次」而不是「词频」：一个词在同一条消息里重复三遍仍只是一条消息里的说法，
+    只有跨消息复现才说明它撑得起这一段对话（见 ``MERGE_MIN_REPEAT`` 的说明）。
+    词面判定直接走 ``tokenize``，与 ``extract_keywords`` 同一套切词，保证可复现。
+    """
+
+    floor = max(1, int(min_messages))
+    counts: dict[str, int] = {}
+    for text in texts:
+        tokens = set(tokenize(text))
+        for keyword in keywords:
+            if keyword in tokens:
+                counts[keyword] = counts.get(keyword, 0) + 1
+    return [str(keyword) for keyword in keywords if counts.get(str(keyword), 0) >= floor]
 
 
 def score_candidate(
@@ -189,10 +239,13 @@ class TopicRanker:
     ) -> dict[str, Any]:
         """识别当前话题：排序候选 → 与当前会话比较 → 必要时开启新会话并发布话题切换事件。
 
-        ``merge=True``（默认）时，候选话题若与当前会话的话题足够相似（关键词重合度
-        ≥ ``MERGE_THRESHOLD``），就**沿用当前会话**而不新开一个 —— 同一段对话的措辞变化
-        不该被当成换话题（见 ``MERGE_THRESHOLD`` 的说明）。真正换话题时相似度会掉到阈值
-        以下，仍按老路子开新会话并发布 ``kafka:grouppig.topic.changed``。
+        ``merge=True``（默认）时，候选话题若与当前会话的话题足够相似（共享实词够多、重叠系数
+        过线、且共享词在当前会话里复现过，见 ``MERGE_THRESHOLD``），就**沿用当前会话**而不新开
+        一个 —— 同一段对话的措辞变化不该被当成换话题。真正换话题时相似度会掉到阈值以下，仍按
+        老路子开新会话并发布 ``kafka:grouppig.topic.changed``。
+
+        ``threshold`` 卡的是**原始分**（``score``，与 ``confidence`` 同一把尺）：原始分不够的
+        弱窗口不会开出新会话，只在已有会话里待着（``weak=True``）。
         """
 
         stamp = float(now if now is not None else self.clock())
@@ -208,7 +261,11 @@ class TopicRanker:
                 "topic": None,
                 "topic_id": "",
                 "confidence": 0.0,
+                "relative_confidence": 0.0,
+                "score": 0.0,
                 "changed": False,
+                "merged": False,
+                "weak": False,
                 "candidates": [],
                 "session": None,
                 "group_id": int(group_id or 0),
@@ -235,6 +292,23 @@ class TopicRanker:
             if merged is not None:
                 best = merged
                 changed = False
+        score = float(best.get("score", 0.0) or 0.0)
+        # 原始分没过阈值：这一窗还不足以支撑一个话题 —— 不开新会话、也不发话题切换事件。
+        #
+        # 原来这里比的是**归一化置信度**，而归一化是拿最高分当分母的（``rank_candidates``），
+        # 候选只有一个时它恒等于 1.0，阈值因此从来没起过作用：一条「嗯」（实测 score=0.275 <
+        # DEFAULT_THRESHOLD=0.45）照样开会话。改成比原始分之后，弱窗口只会在已有会话里待着
+        # （没有会话时不在这里开，交给调用方的兜底路径，保证消息不会掉出会话）。
+        weak = score < threshold
+        if changed and weak:
+            changed = False
+            held = dict(best)
+            if current_topic:
+                held["topic_id"] = current_topic
+                held["phrase"] = str((current or {}).get("title") or "") or str(best.get("phrase") or "")
+                held["keywords"] = list((current or {}).get("keywords") or ())
+            held["weak"] = True
+            best = held
         session = current
         opened = False
         if changed and open_session:
@@ -253,10 +327,15 @@ class TopicRanker:
             "topic": best,
             "topic_id": str(best.get("topic_id", "")),
             "phrase": str(best.get("phrase", "")),
-            "confidence": float(best.get("confidence", best.get("score", 0.0))),
-            "score": float(best.get("score", 0.0)),
+            # confidence 取**原始分**（0~1，与 threshold 同一把尺），而不是「最高分归一」出来的
+            # 相对值：相对值在候选只有一个时恒为 1.0，把「一条嗯」和「一屋子人聊爬山」说成一样
+            # 可信。相对分另有 relative_confidence，排序用得上，但不该冒充绝对置信度。
+            "confidence": score,
+            "relative_confidence": float(best.get("confidence", score) or 0.0),
+            "score": score,
             "changed": bool(changed),
             "merged": merged is not None,
+            "weak": bool(weak),
             "merge_score": float(best.get("merge_score") or 0.0) if merged is not None else 0.0,
             "opened": opened,
             "previous_topic_id": current_topic,
@@ -286,6 +365,10 @@ class TopicRanker:
         参考关键词取**新消息本身**而不是窗口候选：窗口里还留着上一话题的消息，候选短语会被
         上一话题拖着走（实测换到打游戏后候选仍是「爬山、去爬山」），拿它当判据会把新话题
         并进旧会话。
+
+        三个条件同时成立才归并（见 ``MERGE_THRESHOLD`` 的说明）：共享词数够、重叠系数过下限，
+        并且**至少有一个共享词在当前会话里复现过** —— 只沾到一个擦边词（如「一起」）不算
+        同一件事，否则真换话题时 ``changed`` 永远是 ``False``、话题切换事件永远不发。
         """
 
         if not isinstance(current, Mapping):
@@ -296,7 +379,8 @@ class TopicRanker:
         topic_keywords = [str(item) for item in (current.get("keywords") or ())]
         if not topic_keywords:
             topic_keywords = extract_keywords(str(current.get("title") or ""))
-        fresh_texts = texts_of(messages)[-1:] if messages else []
+        window = normalize_messages(messages) if messages else []
+        fresh_texts = texts_of(window)[-1:] if window else []
         fresh_keywords = extract_keywords(fresh_texts) if fresh_texts else []
         if not fresh_keywords:
             fresh_keywords = [str(item) for item in (best.get("keywords") or ())]
@@ -308,6 +392,17 @@ class TopicRanker:
         limit = MERGE_THRESHOLD if threshold is None else float(threshold)
         if shared < MERGE_MIN_SHARED or overlap < limit:
             return None
+        shared_tokens = [token for token in fresh_keywords if token in set(topic_keywords)]
+        session_items = self._session_items(current, window, topic_keywords)
+        if len(session_items) >= MERGE_MIN_REPEAT:
+            recurring = recurring_keywords(texts_of(session_items), shared_tokens)
+        else:
+            # 会话里能谈这个话题的消息不到 2 条：词表里每个词都只出现过一次，复现无从谈起。
+            # 此时退回「窗口内复现」，至少要求共享词在窗口里出现过不止一次；窗口里也只冒过
+            # 一次的孤词（会话刚开、又只有这一条新消息）不算证据，宁可开新会话也不串话题。
+            recurring = recurring_keywords(texts_of(window), shared_tokens)
+        if not recurring:
+            return None
         return {
             **dict(best),
             "topic_id": topic_id,
@@ -316,6 +411,7 @@ class TopicRanker:
             "merged_from": str(best.get("topic_id", "")),
             "merge_score": overlap,
             "merge_shared": shared,
+            "merge_recurring": recurring,
         }
 
     # ---- rpc:topic.resolve --------------------------------------------
@@ -391,6 +487,34 @@ class TopicRanker:
         }
 
     # ---- 内部 ----------------------------------------------------------
+    @staticmethod
+    def _session_items(
+        current: Mapping[str, Any],
+        window: Sequence[Mapping[str, Any]],
+        topic_keywords: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        """从窗口里挑出「当前会话已有的、而且确实在谈这个话题」的消息（复现计数的底座）。
+
+        两个筛子：
+
+        * **归属** —— 消息 id 在会话的 ``message_ids`` 里；拿不到 id（调用方只给了话题关键词）
+          时退而用「窗口里除本条以外的消息」当代理 —— ``on_message`` 每次都是「最近窗口 +
+          本条」一起递进来，前面那几条正是会话已经吃进去的。
+        * **切题** —— 消息至少含一个会话关键词。会话的 ``message_ids`` 未必干净：当前会话没有
+          话题时（``switching=False``）``_open_session`` 会把整个窗口的消息都挂到新会话上，
+          里面可能夹着「嗯」这类与话题无关的插话；它不该被算进复现的基数，否则一个只有一条
+          正经消息的会话会被误判成「够成熟、可以按复现判据卡人」。
+        """
+
+        items = [dict(item) for item in window]
+        session_ids = {str(item) for item in (current.get("message_ids") or ()) if str(item)}
+        if session_ids:
+            items = [item for item in items if str(item.get("message_id", "")) in session_ids]
+        else:
+            items = items[:-1]
+        keywords = {str(keyword) for keyword in topic_keywords if str(keyword)}
+        return [item for item in items if keywords & set(tokenize(str(item.get("content", "") or "")))]
+
     async def _classify(
         self, messages: Sequence[Mapping[str, Any]], ranked: Sequence[Mapping[str, Any]]
     ) -> tuple[int, str] | None:
@@ -554,6 +678,9 @@ def register(registry: Any, ranker: TopicRanker | None = None, *, replace: bool 
 __all__ = [
     "DEFAULT_THRESHOLD",
     "HALF_LIFE",
+    "MERGE_MIN_REPEAT",
+    "MERGE_MIN_SHARED",
+    "MERGE_THRESHOLD",
     "MODULE",
     "RPC",
     "RPC_DETECT",
@@ -563,6 +690,8 @@ __all__ = [
     "TOPICS",
     "TOPIC_CHANGED",
     "TopicRanker",
+    "keyword_overlap",
+    "recurring_keywords",
     "register",
     "score_candidate",
     "topic_id_for",

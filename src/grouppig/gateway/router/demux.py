@@ -278,7 +278,10 @@ class EventRouter:
                     "at": [payload["user_id"]] if payload.get("user_id") else None,
                     "source": "command",
                     "command": result.name,
-                }
+                },
+                # 命令回执必须穿透 `/闭嘴` 总闸：否则用户说「闭嘴」后连
+                # 「好，我闭嘴。」都收不到，而且再也喊不回来。
+                force=True,
             )
             self.stats.local_replies += 1
         except Exception as exc:

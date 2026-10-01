@@ -39,6 +39,9 @@ class SentMessage:
     text: str = ""
     source: str = ""
     at: float = 0.0
+    #: 同一次 ``rpc:sender.send_reply`` 发出的多条消息共用的批次号。
+    #: 超长回复会被切分成多条，撤回时必须整批撤（见 :meth:`Retractor.recall_batch`）。
+    batch: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +51,7 @@ class SentMessage:
             "text": self.text,
             "source": self.source,
             "at": self.at,
+            "batch": self.batch,
         }
 
 
@@ -109,6 +113,7 @@ class Retractor:
         user_id: int | str | None = None,
         text: str = "",
         source: str = "",
+        batch: str = "",
     ) -> SentMessage:
         """记住一条自己发出的消息（由 composer 调用）。"""
 
@@ -119,10 +124,19 @@ class Retractor:
             text=text,
             source=source,
             at=self._clock(),
+            batch=batch,
         )
         self._sent.append(record)
         self.stats["remembered"] += 1
         return record
+
+    def batch_of(self, batch: str) -> list[SentMessage]:
+        """取某个批次里还记着的全部已发消息（按发送顺序）。"""
+
+        wanted = str(batch or "")
+        if not wanted:
+            return []
+        return [record for record in self._sent if record.batch == wanted]
 
     def notify(
         self,
@@ -229,6 +243,61 @@ class Retractor:
         return await self.recall(
             record.message_id, group_id=record.group_id, reason=reason, detail=detail, timeout=timeout
         )
+
+    async def recall_batch(
+        self,
+        batch: str,
+        *,
+        reason: str = "misfire",
+        detail: str = "",
+        notify: bool = True,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """撤回同一次发送产生的**全部**消息。
+
+        超长回复会被切分成多条（``composer.wrap`` 的 chunks）。此前只有第一条被
+        ``remember``，于是「撤回这条」只删掉第一段，剩下的错话留在群里。
+        现在 composer 给整批打同一个 ``batch``，这里逐条撤回并汇总结果。
+        """
+
+        records = self.batch_of(batch)
+        if not records:
+            return {
+                "batch": batch,
+                "ok": False,
+                "recalled": 0,
+                "failed": 0,
+                "message_ids": [],
+                "results": [],
+                "error": "no_sent_message",
+            }
+        results: list[dict[str, Any]] = []
+        recalled = 0
+        failed = 0
+        for index, record in enumerate(records):
+            # 只有第一条记原因，避免同一批在原因环里刷屏
+            outcome = await self.recall(
+                record.message_id,
+                group_id=record.group_id,
+                reason=reason,
+                detail=detail,
+                notify=notify and index == 0,
+                timeout=timeout,
+            )
+            results.append(outcome)
+            if outcome.get("ok"):
+                recalled += 1
+            else:
+                failed += 1
+        return {
+            "batch": batch,
+            "ok": failed == 0,
+            "recalled": recalled,
+            "failed": failed,
+            "message_ids": [record.message_id for record in records],
+            "results": results,
+            "error": "" if failed == 0 else f"{failed} 条撤回失败",
+        }
 
     def status(self) -> dict[str, Any]:
         return {

@@ -29,6 +29,20 @@ LAYA_PROVIDER = "laya"
 
 DEFAULT_EMBED_PATH = "/embeddings"
 
+#: 是否让 httpx 读取环境里的代理变量（``HTTP_PROXY`` / ``ALL_PROXY`` / ``NO_PROXY`` …）。
+#:
+#: 默认 **False**，理由是这里的行为必须可预测：
+#:
+#: * 模型服务商是公网 HTTPS 端点，宿主环境里的代理变量通常是**别的工具**留下的，
+#:   静默劫持模型调用会表现为「连接超时 / 502」，而配置里看不出任何异常；
+#: * ``NO_PROXY`` 里一个不合法的条目就足以让 httpx 在**构造客户端时**抛异常。
+#:   实测宿主 ``no_proxy=localhost,127.0.0.1,::1,[::1]`` 时，
+#:   httpx 把 ``[::1]`` 当端口解析 → ``InvalidURL: Invalid port: ':1]'``，
+#:   于是**所有** HTTP 传输调用在发出请求前就炸掉（本仓库 48 个用例因此变红）。
+#:
+#: 需要走代理的部署显式设 ``model.trust_env = true``。
+DEFAULT_TRUST_ENV = False
+
 
 @runtime_checkable
 class ModelTransport(Protocol):
@@ -56,6 +70,7 @@ class HttpTransport:
     timeout: float = 30.0
     provider: str = ""
     max_connections: int = 20
+    trust_env: bool = DEFAULT_TRUST_ENV
     _client: Any = None
 
     def __post_init__(self) -> None:
@@ -78,6 +93,7 @@ class HttpTransport:
             timeout=self.timeout,
             headers=self._headers(),
             limits=httpx.Limits(max_connections=self.max_connections),
+            trust_env=self.trust_env,
         )
         return self._client
 
@@ -157,6 +173,21 @@ def resolve_api_key(config: Any, provider: str, *, environ: dict[str, str] | Non
     return text or None
 
 
+def resolve_trust_env(config: Any, *, default: bool = DEFAULT_TRUST_ENV) -> bool:
+    """读 ``model.trust_env``（缺省 / 非布尔值一律回落默认值）。"""
+
+    value = config.get("model.trust_env", default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off"):
+            return False
+    return default
+
+
 def build_transport(
     config: Any,
     *,
@@ -175,6 +206,7 @@ def build_transport(
     retry_cfg = config.section("model.retry")
     resolved_timeout = float(timeout if timeout is not None else retry_cfg.get("timeout", 30.0))
     resolved_key = api_key if api_key is not None else resolve_api_key(config, provider, environ=environ)
+    trust_env = resolve_trust_env(config)
     if provider.strip().lower() == LAYA_PROVIDER:
         # LAY A：唯一端点 /v1/systemone，非 OpenAI 兼容（见 infra/runtime/laya_system1.py）
         return LayaSystemOneTransport(
@@ -182,18 +214,21 @@ def build_transport(
             api_key=resolved_key,
             timeout=resolved_timeout,
             provider=provider,
+            trust_env=trust_env,
         )
     return HttpTransport(
         base_url=str(spec.get("base_url") or ""),
         api_key=resolved_key,
         timeout=resolved_timeout,
         provider=provider,
+        trust_env=trust_env,
     )
 
 
 __all__ = [
     "DEFAULT_CHAT_PATH",
     "DEFAULT_EMBED_PATH",
+    "DEFAULT_TRUST_ENV",
     "HttpTransport",
     "LAYA_PROVIDER",
     "LOCAL_EMBED_PROVIDER",
@@ -203,4 +238,5 @@ __all__ = [
     "build_transport",
     "provider_spec",
     "resolve_api_key",
+    "resolve_trust_env",
 ]

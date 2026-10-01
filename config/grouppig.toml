@@ -32,6 +32,11 @@ threshold = 0.26
 
 [model]
 default_provider = "a6api"
+# 是否让 httpx 读取环境代理变量（HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY）。
+# 默认 false：模型服务商是公网 HTTPS 端点，被宿主代理静默劫持只会表现为「超时 / 502」，
+# 配置里看不出异常；而且不合法的 NO_PROXY 条目（例如 [::1]）会让 httpx 在构造客户端时
+# 直接抛 InvalidURL，所有模型调用在发出请求前就失败。需要走代理的部署显式设 true。
+trust_env = false
 
 [model.providers.a6api]
 # 按实际服务商填写，例如 "https://<host>/v1"；留空时 http transport 启动会告警。

@@ -146,7 +146,7 @@ class Gateway:
         return self
 
     async def aclose(self) -> None:
-        """停泵、退订、断连。"""
+        """停泵、退订、等在途发送落地、断连。"""
 
         await self.demux.stop_pump()
         self.demux.detach()
@@ -154,6 +154,12 @@ class Gateway:
         if self.reply_subscription is not None and self.bus is not None:
             self.bus.unsubscribe(self.reply_subscription)
             self.reply_subscription = None
+        # 退订只是不再接新回复；已经派生的发送任务还在跑（可能正在等节流窗口）。
+        # 不等它们就断连，排队中的回复会被静默丢弃、pending 停在非零。
+        if self.composer is not None:
+            leftover = await self.composer.wait_idle()
+            if leftover:
+                self._log("warning", "gateway.close_pending_sends", pending=leftover)
         with contextlib.suppress(Exception):
             await self.adapter.stop()
         self.started = False
@@ -249,16 +255,6 @@ def build_gateway(
         _config_get(config, "onebot.sender.max_length", composer_module.DEFAULT_MAX_LENGTH)
         or composer_module.DEFAULT_MAX_LENGTH
     )
-    composer = composer or ReplyComposer(
-        adapter,
-        limiter=limiter,
-        registry=registry,
-        retractor=retractor,
-        logger=logger,
-        max_length=max_length,
-        quote=bool(_config_get(config, "onebot.sender.quote", True)),
-        auto_emoji=bool(_config_get(config, "onebot.sender.auto_emoji", True)),
-    )
     gateway = Gateway(
         registry=registry,
         config=config,
@@ -269,14 +265,28 @@ def build_gateway(
         queue=queue,
         limiter=limiter,
         retractor=retractor,
-        composer=composer,
         extra=dict(options),
     )
+    # commands 必须先于 composer 建好：composer 的 gate 直接读它的 features，
+    # 这样 `/闭嘴` 翻开关的那一刻，出站就真的被拦下（此前 features 只被 status 读出来展示）。
     gateway.commands = commands or CommandRouter(
         logger=logger,
         status_provider=gateway.health,
         features={"speak": True, "reply": True},
     )
+    composer = composer or ReplyComposer(
+        adapter,
+        limiter=limiter,
+        registry=registry,
+        retractor=retractor,
+        logger=logger,
+        max_length=max_length,
+        quote=bool(_config_get(config, "onebot.sender.quote", True)),
+        auto_emoji=bool(_config_get(config, "onebot.sender.auto_emoji", True)),
+        self_id=conn.config.self_id,
+        gate=lambda: gateway.commands.features,
+    )
+    gateway.composer = composer
     gateway.demux = EventRouter(
         commands=gateway.commands,
         queue=queue,

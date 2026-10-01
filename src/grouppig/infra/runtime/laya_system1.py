@@ -349,6 +349,8 @@ class LayaSystemOneTransport:
     path: str = SYSTEM_ONE_PATH
     default_model: str = "auto"
     max_connections: int = 20
+    #: 见 ``transport.DEFAULT_TRUST_ENV``：默认不读环境代理，行为必须可预测。
+    trust_env: bool = False
     _client: Any = None
 
     def __post_init__(self) -> None:
@@ -372,6 +374,7 @@ class LayaSystemOneTransport:
             timeout=self.timeout,
             headers=self._headers(),
             limits=httpx.Limits(max_connections=self.max_connections),
+            trust_env=self.trust_env,
         )
         return self._client
 

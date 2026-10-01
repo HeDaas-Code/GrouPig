@@ -188,6 +188,11 @@ def validate_config(config: Config) -> ValidationReport:
         if not isinstance(fallbacks, list):
             report.error("type", f"model.tasks.{task}.fallback_models", "应为字符串数组")
 
+    # 传输层是否读取环境代理（HTTP_PROXY / ALL_PROXY / NO_PROXY …）。
+    # 默认 false：模型服务商是公网端点，被宿主代理静默劫持会表现为「超时 / 502」，
+    # 而配置里看不出异常；且不合法的 NO_PROXY 条目会让 httpx 构造客户端时直接抛错。
+    _check_type(report, config, "model.trust_env", (bool,))
+
     _check_range(report, config, "model.retry.max_attempts", minimum=1, types=(int,))
     _check_range(report, config, "model.retry.base_delay", minimum=0.0)
     _check_range(report, config, "model.retry.max_delay", minimum=0.0)

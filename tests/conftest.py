@@ -33,7 +33,9 @@ def config_file(tmp_path: Path, config_text: str) -> Path:
 
     path = tmp_path / "grouppig.toml"
     path.write_text(
-        config_text.replace("threshold = 0.26", "threshold = 0.55").replace("renormalize = true", "renormalize = false"),
+        config_text.replace("threshold = 0.26", "threshold = 0.55").replace(
+            "renormalize = true", "renormalize = false"
+        ),
         encoding="utf-8",
     )
     return path

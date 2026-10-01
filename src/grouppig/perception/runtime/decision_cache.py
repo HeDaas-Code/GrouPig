@@ -20,10 +20,20 @@ DEFAULT_TTL = 3.0
 DEFAULT_CAPACITY = 2048
 _MISSING = object()
 T = TypeVar("T")
-_VOLATILE_KEYS = frozenset({
-    "at", "ts", "timestamp", "received_at", "created_at", "updated_at",
-    "latency_ms", "request_id", "correlation_id", "trace_id",
-})
+_VOLATILE_KEYS = frozenset(
+    {
+        "at",
+        "ts",
+        "timestamp",
+        "received_at",
+        "created_at",
+        "updated_at",
+        "latency_ms",
+        "request_id",
+        "correlation_id",
+        "trace_id",
+    }
+)
 _ALIASES = {"messageId": "message_id", "userId": "user_id", "groupId": "group_id"}
 
 
@@ -74,12 +84,25 @@ def _key_digest(prefix: str, payload: Mapping[str, Any]) -> str:
     return f"{prefix}:{hashlib.sha256(blob.encode('utf-8')).hexdigest()}"
 
 
-def decision_idempotency_key(*, group_id: int | str, window_fp: str, policy_revision: str = "", decision_revision: str = "") -> str:
-    return _key_digest("decision", {"group_id": str(group_id), "window_fp": window_fp, "policy_revision": policy_revision, "decision_revision": decision_revision})
+def decision_idempotency_key(
+    *, group_id: int | str, window_fp: str, policy_revision: str = "", decision_revision: str = ""
+) -> str:
+    return _key_digest(
+        "decision",
+        {
+            "group_id": str(group_id),
+            "window_fp": window_fp,
+            "policy_revision": policy_revision,
+            "decision_revision": decision_revision,
+        },
+    )
 
 
 def flow_idempotency_key(*, group_id: int | str, window_fp: str, decision_id: str = "", flow_revision: str = "") -> str:
-    return _key_digest("flow", {"group_id": str(group_id), "window_fp": window_fp, "decision_id": decision_id, "flow_revision": flow_revision})
+    return _key_digest(
+        "flow",
+        {"group_id": str(group_id), "window_fp": window_fp, "decision_id": decision_id, "flow_revision": flow_revision},
+    )
 
 
 @dataclass(frozen=True)
@@ -91,7 +114,9 @@ class CacheEntry:
 class DecisionCache:
     """Process-local LRU + TTL cache for completed decisions."""
 
-    def __init__(self, *, ttl: float = DEFAULT_TTL, capacity: int = DEFAULT_CAPACITY, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self, *, ttl: float = DEFAULT_TTL, capacity: int = DEFAULT_CAPACITY, clock: Callable[[], float] = time.monotonic
+    ) -> None:
         if ttl < 0 or capacity < 1:
             raise ValueError("ttl must be non-negative and capacity must be positive")
         self.ttl = float(ttl)
@@ -135,7 +160,13 @@ class DecisionCache:
         self._entries.clear()
 
     def stats(self) -> dict[str, int | float]:
-        return {"size": len(self._entries), "hits": self.hits, "misses": self.misses, "expired": self.expired, "ttl": self.ttl}
+        return {
+            "size": len(self._entries),
+            "hits": self.hits,
+            "misses": self.misses,
+            "expired": self.expired,
+            "ttl": self.ttl,
+        }
 
 
 class SingleFlight:
@@ -175,7 +206,13 @@ class SingleFlight:
 
 
 __all__ = [
-    "CacheEntry", "DecisionCache", "FINGERPRINT_VERSION", "SingleFlight",
-    "canonical_json", "canonical_window", "decision_idempotency_key",
-    "flow_idempotency_key", "window_fingerprint",
+    "CacheEntry",
+    "DecisionCache",
+    "FINGERPRINT_VERSION",
+    "SingleFlight",
+    "canonical_json",
+    "canonical_window",
+    "decision_idempotency_key",
+    "flow_idempotency_key",
+    "window_fingerprint",
 ]

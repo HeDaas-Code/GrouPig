@@ -9,8 +9,28 @@ from typing import Any, TypedDict
 
 PACKET_STATES = frozenset({"proposed", "gated", "committed", "expired"})
 FINAL_ACTIONS = frozenset({"speak", "wait", "hold"})
-_FORBIDDEN_KEYS = frozenset({"chain_of_thought", "cot", "internal_monologue", "reasoning_trace", "scratchpad", "thoughts"})
-_TOP_LEVEL = frozenset({"schema_version", "decision_id", "created_at", "deadline_at", "status", "group_id", "context", "persona", "relationship", "local_gates", "features", "laya", "final", "provenance", "errors"})
+_FORBIDDEN_KEYS = frozenset(
+    {"chain_of_thought", "cot", "internal_monologue", "reasoning_trace", "scratchpad", "thoughts"}
+)
+_TOP_LEVEL = frozenset(
+    {
+        "schema_version",
+        "decision_id",
+        "created_at",
+        "deadline_at",
+        "status",
+        "group_id",
+        "context",
+        "persona",
+        "relationship",
+        "local_gates",
+        "features",
+        "laya",
+        "final",
+        "provenance",
+        "errors",
+    }
+)
 
 
 class DecisionPacket(TypedDict):
@@ -50,18 +70,44 @@ def _scan_forbidden(value: Any, path: str = "packet") -> None:
             _scan_forbidden(child, f"{path}[{index}]")
 
 
-def build_packet(*, group_id: int | str | None = None, context: dict[str, Any] | None = None, persona: dict[str, Any] | None = None, relationship: dict[str, Any] | None = None, local_gates: dict[str, Any] | None = None, features: dict[str, Any] | None = None, provenance: dict[str, Any] | None = None, deadline_at: str | None = None, decision_id: str | None = None, created_at: str | None = None) -> DecisionPacket:
+def build_packet(
+    *,
+    group_id: int | str | None = None,
+    context: dict[str, Any] | None = None,
+    persona: dict[str, Any] | None = None,
+    relationship: dict[str, Any] | None = None,
+    local_gates: dict[str, Any] | None = None,
+    features: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None,
+    deadline_at: str | None = None,
+    decision_id: str | None = None,
+    created_at: str | None = None,
+) -> DecisionPacket:
     """Create a proposed packet with explicit, auditable empty sections."""
     packet: DecisionPacket = {
-        "schema_version": 1, "decision_id": decision_id or uuid.uuid4().hex,
-        "created_at": created_at or _now(), "deadline_at": deadline_at,
-        "status": "proposed", "group_id": group_id,
-        "context": _copy_mapping(context), "persona": _copy_mapping(persona),
-        "relationship": _copy_mapping(relationship), "local_gates": _copy_mapping(local_gates),
+        "schema_version": 1,
+        "decision_id": decision_id or uuid.uuid4().hex,
+        "created_at": created_at or _now(),
+        "deadline_at": deadline_at,
+        "status": "proposed",
+        "group_id": group_id,
+        "context": _copy_mapping(context),
+        "persona": _copy_mapping(persona),
+        "relationship": _copy_mapping(relationship),
+        "local_gates": _copy_mapping(local_gates),
         "features": _copy_mapping(features),
-        "laya": {"source": "not_called", "answers": {}, "answered": [], "missing_qids": [], "confidences": {}, "lowest_confidence": None, "escalation_reason": ""},
+        "laya": {
+            "source": "not_called",
+            "answers": {},
+            "answered": [],
+            "missing_qids": [],
+            "confidences": {},
+            "lowest_confidence": None,
+            "escalation_reason": "",
+        },
         "final": {"action": None, "reason": "", "status": "proposed"},
-        "provenance": _copy_mapping(provenance), "errors": [],
+        "provenance": _copy_mapping(provenance),
+        "errors": [],
     }
     return validate_packet(packet)
 
@@ -101,23 +147,36 @@ def apply_laya_result(packet: DecisionPacket, result: dict[str, Any], *, source:
         raise ValueError("LAY A result must be an object")
     out = copy.deepcopy(packet)
     answers = copy.deepcopy(result.get("answers") or {})
-    out["laya"].update({
-        "source": source, "answers": answers,
-        "answered": [str(qid) for qid in result.get("answered") or answers],
-        "missing_qids": [str(qid) for qid in result.get("missing_qids") or []],
-        "confidences": copy.deepcopy(result.get("confidences") or {}),
-        "lowest_confidence": result.get("lowest_confidence"),
-        "threshold": result.get("escalate_below"),
-        "escalation_reason": str(result.get("escalation_reason") or ""),
-        "latency_ms": result.get("latency_ms"), "attempts": result.get("attempts"),
-        "verdict": copy.deepcopy(result.get("verdict")),
-    })
+    out["laya"].update(
+        {
+            "source": source,
+            "answers": answers,
+            "answered": [str(qid) for qid in result.get("answered") or answers],
+            "missing_qids": [str(qid) for qid in result.get("missing_qids") or []],
+            "confidences": copy.deepcopy(result.get("confidences") or {}),
+            "lowest_confidence": result.get("lowest_confidence"),
+            "threshold": result.get("escalate_below"),
+            "escalation_reason": str(result.get("escalation_reason") or ""),
+            "latency_ms": result.get("latency_ms"),
+            "attempts": result.get("attempts"),
+            "verdict": copy.deepcopy(result.get("verdict")),
+        }
+    )
     out["status"] = "gated"
     out["final"]["status"] = "gated"
     return validate_packet(out)
 
 
-def finalize_packet(packet: DecisionPacket, *, action: str, reason: str, score: float | None = None, threshold: float | None = None, margin: float | None = None, expired: bool = False) -> DecisionPacket:
+def finalize_packet(
+    packet: DecisionPacket,
+    *,
+    action: str,
+    reason: str,
+    score: float | None = None,
+    threshold: float | None = None,
+    margin: float | None = None,
+    expired: bool = False,
+) -> DecisionPacket:
     """Apply the local-gate outcome; only this step can commit a packet."""
     validate_packet(packet)
     if packet["status"] != "gated":
@@ -125,9 +184,24 @@ def finalize_packet(packet: DecisionPacket, *, action: str, reason: str, score: 
     if action not in FINAL_ACTIONS:
         raise ValueError(f"invalid final action: {action!r}")
     out = copy.deepcopy(packet)
-    out["final"] = {"action": action, "reason": str(reason), "score": score, "threshold": threshold, "margin": margin, "status": "expired" if expired else "committed"}
+    out["final"] = {
+        "action": action,
+        "reason": str(reason),
+        "score": score,
+        "threshold": threshold,
+        "margin": margin,
+        "status": "expired" if expired else "committed",
+    }
     out["status"] = "expired" if expired else "committed"
     return validate_packet(out)
 
 
-__all__ = ["DecisionPacket", "PACKET_STATES", "FINAL_ACTIONS", "build_packet", "validate_packet", "apply_laya_result", "finalize_packet"]
+__all__ = [
+    "DecisionPacket",
+    "PACKET_STATES",
+    "FINAL_ACTIONS",
+    "build_packet",
+    "validate_packet",
+    "apply_laya_result",
+    "finalize_packet",
+]

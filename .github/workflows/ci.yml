@@ -1,0 +1,76 @@
+name: CI
+
+# 仓库此前没有任何 CI：契约纪律（167 个名字逐字对齐）与「骨架镜像设计树」
+# 这两条最容易在合并时被悄悄破坏，所以门禁必须自动化，而不是靠人记得跑。
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 与本机一致：禁止 httpx 读取环境代理。
+  # 见 tests/test_transport.py 的说明——某些 CI 镜像会带 no_proxy=[::1]，
+  # httpx 解析该值会抛 InvalidURL，表现为 40+ 个「与本次改动无关」的失败。
+  NO_PROXY: ""
+  no_proxy: ""
+  HTTP_PROXY: ""
+  http_proxy: ""
+  HTTPS_PROXY: ""
+  https_proxy: ""
+  ALL_PROXY: ""
+  all_proxy: ""
+
+jobs:
+  test:
+    name: pytest + ruff (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --extra dev --python ${{ matrix.python-version }}
+
+      - name: Lint (ruff check)
+        run: uv run ruff check src tests tools
+
+      - name: Format check (ruff format --check)
+        run: uv run ruff format --check src tests tools
+
+      # addopts 里已有 -q，命令行再给 -q 会叠加成 -qq 并吞掉汇总行；
+      # 这里显式清空 addopts，保证 CI 日志里能看到 "N passed"。
+      - name: Unit + contract tests
+        run: uv run python -m pytest -o addopts="" -q
+
+      - name: Skeleton mirrors the normify design tree
+        run: uv run python tools/gen_skeleton.py --check
+
+      - name: Runtime assembles with zero contract gaps
+        run: |
+          uv run python -m grouppig.runtime --check \
+            --dsn sqlite+aiosqlite:///:memory: --quiet
+
+      - name: End-to-end smoke (mock OneBot server, no network)
+        run: uv run python tools/smoke.py --quiet --json smoke.json
+
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report
+          path: smoke.json
+          if-no-files-found: ignore

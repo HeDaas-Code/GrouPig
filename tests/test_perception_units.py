@@ -367,8 +367,6 @@ def test_aggregator_decide_priority_and_change_detection():
     assert no_llm["changed"] is False
 
 
-
-
 # ---- 冷启动变化检测（t36 / F1）------------------------------------------
 class _RecordingBus:
     """记录发布事件的最小总线替身（只实现 aggregator 用到的 publish）。"""
@@ -697,6 +695,7 @@ def test_classify_damps_flapping_and_publishes_once():
     assert aggregator.stats["published"] == 2, "噪声轮次不得发布 behavior.changed"
     assert len(bus.events) == 2
 
+
 def test_llm_judge_label_normalization():
     judge = LLMJudge(config=None)
     assert judge.normalize_label("刷屏") == "flooding"
@@ -850,8 +849,6 @@ def test_decision_mention_overrides_cooldown_but_not_rate_limit():
         cooldown={"allowed": False, "state": "rate_limited", "penalty": 1.0},
     )
     assert (capped["action"], capped["reason"]) == (ACTION_HOLD, "cooldown"), "每小时上限是硬上限"
-
-
 
 
 # ---- A3: mentioned 权重按场景归一 ---------------------------------------

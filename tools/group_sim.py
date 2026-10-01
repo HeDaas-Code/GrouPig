@@ -318,7 +318,7 @@ async def simulate_group(
 
     server = MockOneBotServer(self_id=SELF_ID)
     url = await server.start()
-    mode_config = f"\n[perception.classify]\ndecision_mode = \"{mode}\"\n"
+    mode_config = f'\n[perception.classify]\ndecision_mode = "{mode}"\n'
     report: dict[str, Any] = {
         "group": corpus.name,
         "key": corpus.key,
@@ -561,16 +561,27 @@ def _audit_report(
         # Keep only explicit decision metadata; exclude message/state/prompt/error text.
         summary = {
             key: fields[key]
-            for key in ("scenario", "model", "provider", "reason", "lowest_confidence", "threshold", "questions", "latency_ms")
+            for key in (
+                "scenario",
+                "model",
+                "provider",
+                "reason",
+                "lowest_confidence",
+                "threshold",
+                "questions",
+                "latency_ms",
+            )
             if key in fields and isinstance(fields[key], (str, int, float, bool, type(None)))
         }
-        excerpts.append({
-            "ts": round(float(getattr(record, "ts", 0.0)), 6),
-            "level": str(getattr(record, "level", "")),
-            "event": event,
-            "duration_ms": round(float(duration), 3) if duration is not None else None,
-            "summary": summary,
-        })
+        excerpts.append(
+            {
+                "ts": round(float(getattr(record, "ts", 0.0)), 6),
+                "level": str(getattr(record, "level", "")),
+                "event": event,
+                "duration_ms": round(float(duration), 3) if duration is not None else None,
+                "summary": summary,
+            }
+        )
     for row in behavior:
         latency = row.get("decision_latency_ms")
         if isinstance(latency, (int, float)):
@@ -586,7 +597,9 @@ def _audit_report(
         "mode_execution": "label_only_no_routing_or_side_effect_change",
         "laya_calls": int(stats.get("classify", 0) or 0) if mode != "off" else 0,
         "runtime": {
-            "laya": {key: value for key, value in stats.items() if "laya" in key or key in ("fallback", "decode_failed")},
+            "laya": {
+                key: value for key, value in stats.items() if "laya" in key or key in ("fallback", "decode_failed")
+            },
             "router": stats,
         },
         "request_latency_ms": _percentiles(request_latencies),
@@ -1287,7 +1300,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--transport", choices=("real", "fake"), default="real", help="real 走真模型；fake 用确定性替身"
     )
     parser.add_argument(
-        "--mode", choices=("off", "shadow", "active"), default="active",
+        "--mode",
+        choices=("off", "shadow", "active"),
+        default="active",
         help="审计标签；当前仅记录模式，不改变模型路由或副作用",
     )
     parser.add_argument("--no-probe", action="store_true", help="跳过边探测（探测里的强制插话会真的调一次模型）")

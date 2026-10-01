@@ -10,7 +10,9 @@ def persona(version=2):
 def test_snapshot_is_stable_and_tracks_versions():
     builder = RuntimeSnapshotBuilder(default_ttl=10)
     first = builder.build(persona(), group_id=1, user_id=7, mood={"valence": 0.2}, source_versions={"mood": 3}, now=100)
-    second = builder.build(persona(), group_id=1, user_id=7, mood={"valence": 0.2}, source_versions={"mood": 3}, now=200)
+    second = builder.build(
+        persona(), group_id=1, user_id=7, mood={"valence": 0.2}, source_versions={"mood": 3}, now=200
+    )
     assert first.content_hash == second.content_hash
     assert first.snapshot_id == second.snapshot_id
     assert first.persona.version == 2

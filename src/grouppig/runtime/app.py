@@ -386,7 +386,13 @@ class GrouppigApp:
         for pump in self.pumps:
             if pump.name == FlowDriver.name:
                 continue  # 事件驱动，没有周期任务
-            pump.start(immediate=immediate)
+            # 保留策略是慢活，启动路径上不该先删一遍库 —— 而且它一轮要跑**三个** DB
+            # 调用，比其它泵慢得多：若在即时首拍里被留下半途（宿主跑完 `start()` 就
+            # 停掉那个 loop —— pytest-asyncio 的异步夹具正是这么干的），它会攥着
+            # `SerializedConnection` 的闸门不放，把之后**任何**跨 loop 的读库请求
+            # 永久挂死（实测：面板的同步快照被冻住，全量套件卡在 60%）。
+            # 所以无论全局开关怎么设，它都跳过首拍。
+            pump.start(immediate=immediate and pump.name != MaintenancePump.name)
         return self.pumps
 
     @property

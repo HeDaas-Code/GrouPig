@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import urllib.error
@@ -240,3 +241,49 @@ def test_tui_without_tty_degrades(capsys, monkeypatch):
     assert tui.run(None) == 0
     out = capsys.readouterr().out
     assert "没有可用 TTY" in out or "GrouPig 面板（文本模式）" in out
+
+
+# ---- 面板不许把进程挂死 ----------------------------------------------------
+def test_sync_table_read_degrades_when_the_gate_is_stranded():
+    """闸门被另一个（已停掉的）loop 上的任务攥着时，同步读表必须有界地降级。
+
+    复现的现场：``build_app`` 的泵在即时首拍里跑 DB 调用，宿主跑完 ``start()``
+    就停掉那个 loop —— 泵的任务被留在半途，攥着 ``SerializedConnection`` 的闸门。
+    此后任何跨 loop 的读库都会**永远**等下去。实测：全量套件卡在 60%，
+    ``test_web_serves_live_snapshot_endpoint`` 单跑也超时。
+
+    面板是运维排查用的东西，卡死比读不到表更糟。所以这里断言它**返回**。
+    """
+
+    import asyncio
+
+    from grouppig.infra.runtime.registry import Registry
+    from grouppig.panel.snapshot import table_counts
+    from grouppig.runtime.app import build_app
+
+    async def setup():
+        app = build_app(registry=Registry(), dsn="sqlite+aiosqlite:///:memory:", connect=False)
+        await app.start()
+        # 闸门交给一个只属于 loop A 的任务，然后 loop A 就此停摆。
+        # asyncio.Lock 不会因为持有者结束而自动释放 —— 这正是死锁的形状。
+        await app.memory.db._gate._lock.acquire()
+        return app
+
+    loop = asyncio.new_event_loop()
+    try:
+        app = loop.run_until_complete(setup())
+        assert app.memory.db._gate._lock.locked() is True, "前置条件：闸门必须是被占着的"
+
+        # 从「没有运行中的 loop」的同步上下文读表：必须返回，不能挂死
+        result = table_counts(app, limit=3, timeout=0.5)
+        assert result["available"] is False, result
+        assert "超时" in result["reason"], result
+        assert result["tables"] == {}
+    finally:
+        # 闸门是被占着的，`aclose()` 可能卡在同一个死锁上；直接取消 loop A 上的
+        # 全部任务再关循环，避免留下「Task was destroyed but it is pending」噪音。
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
+        with contextlib.suppress(Exception):
+            loop.run_until_complete(asyncio.gather(*asyncio.all_tasks(loop), return_exceptions=True))
+        loop.close()

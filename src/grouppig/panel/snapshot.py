@@ -27,6 +27,9 @@ from grouppig.memory.runtime.schema import CONTRACT_TABLES
 #: 快照格式版本，前端可据此判断兼容性。
 SNAPSHOT_VERSION = 1
 
+#: 同步读表的默认上限（秒）。面板宁可报「读不到」，也不能把进程挂死。
+DEFAULT_TABLE_TIMEOUT = 5.0
+
 #: 事件流在内存里最多保留多少条。
 EVENT_BUFFER_SIZE = 200
 
@@ -147,8 +150,15 @@ def _short(value: Any) -> str:
     return type(value).__name__
 
 
-def table_counts(app: Any = None, *, limit: int = 20) -> dict[str, Any]:
-    """契约表行数（走 memory 层；任何一张表读不到都单独记错）。"""
+def table_counts(app: Any = None, *, limit: int = 20, timeout: float = DEFAULT_TABLE_TIMEOUT) -> dict[str, Any]:
+    """契约表行数（走 memory 层；任何一张表读不到都单独记错）。
+
+    **必须有界**：同步入口在没有运行中的 loop 时会自己开一个（``asyncio.run``），
+    而 memory 的 ``SerializedConnection`` 闸门是按 loop 绑定的。若闸门正被另一个
+    （已经停掉的）loop 上的任务攥着 —— 例如某个泵的即时首拍被留下半途 ——
+    这个新 loop 就会**永远**等下去。面板是运维排查用的东西，卡死比读不到表更糟：
+    超时后降级成 ``available: False``，把「读不到」如实报出来。
+    """
 
     database = _database(app)
     if database is None:
@@ -168,9 +178,19 @@ def table_counts(app: Any = None, *, limit: int = 20) -> dict[str, Any]:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        tables = asyncio.run(collect())
+        pass
     else:
         return {"available": False, "reason": "同步快照不能在有事件循环的线程里读表", "tables": {}}
+
+    bounded = max(0.0, float(timeout))
+    try:
+        tables = asyncio.run(asyncio.wait_for(collect(), bounded if bounded else None))
+    except TimeoutError:
+        return {
+            "available": False,
+            "reason": f"读表超时（{bounded:g}s）：数据库连接可能被另一个事件循环上的任务占着",
+            "tables": {},
+        }
     return {"available": True, "tables": tables}
 
 

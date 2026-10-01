@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -193,3 +194,58 @@ async def stores():
         yield instance
     finally:
         await instance.aclose()
+
+
+# ---- 启动路径：慢活不许在首拍里跑 ------------------------------------------
+async def test_app_start_does_not_tick_the_maintenance_pump():
+    """``start()`` 默认让泵跑即时首拍，但保留策略必须例外。
+
+    它不是「一拍就完」的：一轮要跑三个 DB 调用，比其它泵慢得多。若在首拍里被留下
+    半途（宿主跑完 ``start()`` 就停掉那个 loop —— pytest-asyncio 的异步夹具正是
+    这么干的），它会攥着 ``SerializedConnection`` 的闸门不放，把**之后任何**跨
+    loop 的读库请求永久挂死。实测：面板的同步快照就是这么被冻住的。
+    """
+
+    from grouppig.runtime.app import build_app
+
+    app = build_app(
+        config_path=None,
+        dsn="sqlite+aiosqlite:///:memory:",
+        connect=False,
+        registry=_isolated_registry(),
+    )
+    try:
+        await app.start()
+        # 必须把控制权真的让出去：`_Pump._run` 是「先 tick 再 sleep」，
+        # 刚 create_task 时它还没被调度，立刻断言等于什么都没测。
+        for _ in range(20):
+            await asyncio.sleep(0.005)
+        pump = next(p for p in app.pumps if p.name == MaintenancePump.name)
+        assert pump.stats["ticks"] == 0, "保留策略不该在启动首拍里跑"
+        assert pump.stats["runs"] == 0
+        assert app.options.pump_first_tick_immediate is True, "全局开关本身不该被改掉"
+    finally:
+        await app.aclose()
+
+
+async def test_maintenance_pump_leaves_the_connection_gate_free_on_start():
+    """首拍跳过之后，序列化连接的闸门必须是空的——否则跨 loop 的读库会死锁。"""
+
+    from grouppig.runtime.app import build_app
+
+    app = build_app(
+        config_path=None,
+        dsn="sqlite+aiosqlite:///:memory:",
+        connect=False,
+        registry=_isolated_registry(),
+    )
+    try:
+        await app.start()
+        for _ in range(20):
+            await asyncio.sleep(0.005)
+        gate = getattr(app.memory.db, "_gate", None)
+        assert gate is not None
+        assert gate._lock.locked() is False, "启动后闸门不该被任何泵攥着"
+        assert gate._owner is None
+    finally:
+        await app.aclose()

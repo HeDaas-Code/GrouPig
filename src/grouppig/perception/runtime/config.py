@@ -94,6 +94,17 @@ DEFAULTS: dict[str, Any] = {
     # 提问密度折让（见 decision.DEFAULT_QUESTION_RATIO_MIN）：不动权重，只降门槛。
     "perception.interrupt.question_ratio_min": 0.34,
     "perception.interrupt.question_discount": 0.08,
+    # 多钩子自主激活网络（不替换传统插话分数）。
+    "perception.activation.enabled": True,
+    "perception.activation.followup_timeout": 900.0,
+    "perception.activation.event_gap": 180.0,
+    "perception.activation.memory_promote_after": 3,
+    "perception.activation.memory_ttl": 86400.0,
+    "perception.activation.energy_initial": 1.0,
+    "perception.activation.energy_reserve": 0.15,
+    "perception.activation.energy_recovery_rate": 0.018,
+    "perception.activation.bot_names": (),
+    "perception.activation.interest_tags": (),
 }
 
 

@@ -171,6 +171,7 @@ class InterruptDecision:
         cooldown: Mapping[str, Any] | None = None,
         threshold: float | None = None,
         features: Mapping[str, Any] | None = None,
+        activation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """据分数与冷却给出决策（纯函数）。"""
 
@@ -201,6 +202,19 @@ class InterruptDecision:
             limit = max(QUESTION_FLOOR, limit - self.question_discount)
 
         rate_limited = str(cooldown.get("state") or "") == STATE_RATE_LIMITED
+        activation = dict(activation or {})
+        activation_event = dict(activation.get("event") or {})
+        autonomous = bool(
+            activation.get("enabled")
+            and activation.get("active")
+            and int(activation_event.get("new_messages") or 0) > 0
+            and str(activation_event.get("status") or "") not in {"dormant", "resolved"}
+        )
+        try:
+            activation_score = max(0.0, min(1.0, float(activation.get("score") or 0.0)))
+        except (TypeError, ValueError):
+            activation_score = 0.0
+        effective_score = max(float(score), activation_score) if autonomous else float(score)
         # 被点名是「不可以沉默」的信号：可越过冷却与退避，但越不过每小时的硬上限。
         mentioned_override = mentioned >= 0.9 and not rate_limited
 
@@ -210,12 +224,12 @@ class InterruptDecision:
             action, reason = ACTION_HOLD, REASON_FLOODING
         elif not cooldown.get("allowed", True) and not mentioned_override:
             action, reason = ACTION_HOLD, REASON_COOLDOWN
-        elif score >= limit:
+        elif effective_score >= limit:
             action, reason = (
                 ACTION_SPEAK,
                 (REASON_MENTIONED if mentioned >= 0.9 else REASON_QUESTION if question_applied else REASON_SCORE),
             )
-        elif score >= limit - WAIT_BAND and limit - WAIT_BAND > 0:
+        elif effective_score >= limit - WAIT_BAND and limit - WAIT_BAND > 0:
             action, reason = ACTION_WAIT, REASON_NEAR_THRESHOLD
         else:
             action, reason = ACTION_HOLD, REASON_LOW_SCORE
@@ -224,7 +238,9 @@ class InterruptDecision:
             "action": action,
             "speak": action == ACTION_SPEAK,
             "reason": reason,
-            "score": round(float(score), 4),
+            "score": round(effective_score, 4),
+            "legacy_score": round(float(score), 4),
+            "autonomous": autonomous,
             "threshold": round(limit, 4),
             "band": band or _band(score),
             "margin": round(float(score) - limit, 4),
@@ -249,6 +265,7 @@ class InterruptDecision:
         behavior: str = "",
         cooldown: Mapping[str, Any] | None = None,
         features: Mapping[str, Any] | None = None,
+        activation: Mapping[str, Any] | None = None,
         now: float | None = None,
         drain: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -266,6 +283,7 @@ class InterruptDecision:
             behavior=behavior,
             cooldown=cooldown_payload,
             features=features,
+            activation=activation,
         )
         self.stats["decided"] += 1
         self.stats[payload["action"]] = self.stats.get(payload["action"], 0) + 1
@@ -275,6 +293,7 @@ class InterruptDecision:
             "at": stamp,
             "cooldown": cooldown_payload,
             "features": dict(features or {}),
+            "activation": dict(activation or {}),
             "event": None,
             "flow": None,
             "published": False,
@@ -369,6 +388,7 @@ class InterruptDecision:
             behavior: str = "",
             cooldown: Mapping[str, Any] | None = None,
             features: Mapping[str, Any] | None = None,
+            activation: Mapping[str, Any] | None = None,
             now: float | None = None,
             action: str = "decide",
             **_: Any,
@@ -382,6 +402,7 @@ class InterruptDecision:
                 behavior=behavior,
                 cooldown=cooldown,
                 features=features,
+                activation=activation,
                 now=now,
             )
 

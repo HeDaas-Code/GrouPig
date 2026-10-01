@@ -23,11 +23,13 @@ normify id: ``grouppig.perception.runtime.di``（运行时补充模块，设计�
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from grouppig.infra.runtime import contract
 from grouppig.infra.runtime.registry import Registry
+from grouppig.perception.activation import ActivationNetwork
 from grouppig.perception.behavior.classifier.aggregator import BehaviorAggregator, build_aggregator
 from grouppig.perception.behavior.classifier.features import BehaviorFeatureEncoder, build_encoder
 from grouppig.perception.behavior.classifier.llm_judge import LLMJudge, build_judge
@@ -99,6 +101,7 @@ class Perception:
     aggregator: BehaviorAggregator | None = None
     cooldown: Cooldown | None = None
     scorer: InterruptScorer | None = None
+    activation: ActivationNetwork | None = None
     decision: InterruptDecision | None = None
     subscriptions: list[Any] = field(default_factory=list)
     installed: bool = False
@@ -125,6 +128,7 @@ class Perception:
             self.cooldown,
             self.scorer,
             self.decision,
+            self.activation,
         ), "感知层组件未装配"
         self.window.register(self.registry)
         self.deduper.register(self.registry)
@@ -220,6 +224,7 @@ class Perception:
             "classifier": self.aggregator.snapshot() if self.aggregator else {},
             "interrupt": self.decision.snapshot() if self.decision else {},
             "scorer": {"weights": self.scorer.weights if self.scorer else {}},
+            "activation": self.activation.snapshot() if self.activation else {},
             "counters": {
                 "ingested": self.buffer.stats.get("ingested", 0) if self.buffer else 0,
                 "classified": self.aggregator.stats.get("classified", 0) if self.aggregator else 0,
@@ -290,8 +295,15 @@ def build_perception(
         **options,
     )
     cooldown = build_cooldown(config=config, logger=logger, **({"clock": clock} if clock else {}))
+    activation = ActivationNetwork(config=config, clock=clock or time.time)
     scorer = build_scorer(
-        config=config, logger=logger, registry=target, cooldown=cooldown, rhythm=meter, window=rolling
+        config=config,
+        logger=logger,
+        registry=target,
+        cooldown=cooldown,
+        rhythm=meter,
+        window=rolling,
+        activation=activation,
     )
     decision = build_decision(config=config, logger=logger, registry=target, bus=bus, cooldown=cooldown)
 
@@ -316,6 +328,7 @@ def build_perception(
         aggregator=aggregator,
         cooldown=cooldown,
         scorer=scorer,
+        activation=activation,
         decision=decision,
     )
 

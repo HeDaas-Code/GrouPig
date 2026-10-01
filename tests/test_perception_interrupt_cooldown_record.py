@@ -13,10 +13,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
-import pytest
-
 from grouppig.perception.interrupt.cooldown import Cooldown
 from grouppig.perception.interrupt.decision import (
     ACTION_HOLD,

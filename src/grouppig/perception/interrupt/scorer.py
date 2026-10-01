@@ -31,6 +31,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from grouppig.infra.runtime.registry import Registry
+from grouppig.perception.activation import ActivationNetwork
 from grouppig.perception.behavior.classifier.features import build_encoder
 from grouppig.perception.behavior.rhythm.meter import RhythmMeter, build_meter
 from grouppig.perception.interrupt.cooldown import Cooldown, build_cooldown
@@ -108,6 +109,7 @@ class InterruptScorer:
         cascade_decision: bool = True,
         learn_after: int | None = None,
         renormalize: bool | None = None,
+        activation: ActivationNetwork | None = None,
     ) -> None:
         self.registry = calls_module.registry_of(registry)
         self.config = config
@@ -116,6 +118,8 @@ class InterruptScorer:
         self.cooldown = cooldown or build_cooldown(config=config, logger=logger)
         self.rhythm = rhythm or build_meter(config=config, logger=logger, registry=self.registry, window=window)
         self.encoder = encoder or build_encoder(config=config, logger=logger)
+        # 保留传统四分量分数不变；激活网络提供事件线、精力和自主参与诊断。
+        self.activation = activation or ActivationNetwork(config=config)
         self.weights = dict(weights) if weights is not None else config_module.weights(config)
         self.intimacy = float(
             intimacy
@@ -393,6 +397,17 @@ class InterruptScorer:
             self_id=self_id,
             learned=self._seen.get(int(group_id)),
         )
+        activation = self.activation.evaluate(
+            int(group_id),
+            rows,
+            features=features,
+            behavior=behavior,
+            rhythm=rhythm_payload,
+            flood=flood,
+            self_id=self_id,
+            intimacy=float(intimacy if intimacy is not None else self.intimacy),
+            now=stamp,
+        )
         out: dict[str, Any] = {
             "group_id": int(group_id),
             "window_seconds": span,
@@ -405,6 +420,7 @@ class InterruptScorer:
             "downstream": {},
             "decision": None,
             "at": stamp,
+            "activation": activation,
             **payload,
         }
         want_decide = self.cascade_decision if decide is None else bool(decide)
@@ -415,6 +431,7 @@ class InterruptScorer:
                 int(group_id),
                 score=out["total"],
                 score_detail={key: out[key] for key in ("total", "raw_total", "band", "components", "penalties")},
+                activation=activation,
                 behavior=behavior,
                 cooldown=cooldown,
                 features=features,
@@ -423,6 +440,12 @@ class InterruptScorer:
             results.append(decision_outcome)
             if decision_outcome.ok:
                 out["decision"] = decision_outcome.result
+                decision_payload = decision_outcome.result
+                if isinstance(decision_payload, Mapping) and decision_payload.get("speak"):
+                    event_id = str((activation.get("event") or {}).get("event_id") or "")
+                    out["activation_after"] = self.activation.record_spoken(
+                        int(group_id), event_id=event_id, at=stamp
+                    )
         out["downstream"] = calls_module.outcomes(results)
         self._last[int(group_id)] = out
         return out

@@ -42,6 +42,33 @@ question_discount = 0.08
 # 永远无法被顶掉，而 flooding 会让插话评分直接 hold，等于把这个群永久静音。
 sticky_ttl = 180.0
 
+[perception.activation]
+# 多钩子自主激活：传统插话分数仍保留，激活快照额外提供事件线、精力和回声状态。
+enabled = true
+followup_timeout = 900.0
+event_gap = 180.0
+memory_promote_after = 3
+memory_ttl = 86400.0
+energy_initial = 1.0
+energy_reserve = 0.15
+energy_recovery_rate = 0.018
+# 机器人在群里被直接叫名字时，进入“人在回路”；可按部署昵称继续扩展。
+bot_names = ["laya"]
+interest_tags = []
+
+[perception.activation.weights]
+mention = 1.0
+name = 0.82
+reply = 0.78
+interest = 0.34
+question = 0.26
+unresolved = 0.22
+momentum = 0.24
+echo = 0.28
+social = 0.12
+silence = 0.10
+flood = -0.35
+
 [model]
 default_provider = "a6api"
 # 是否让 httpx 读取环境代理变量（HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY）。
@@ -78,7 +105,7 @@ api_key_field = "model.api_key"
 
 [model.tasks.chat]
 provider = "a6api"
-model = "grok-4.6"
+model = "gemini-3.8-flash"
 temperature = 0.8
 max_tokens = 512
 fallback_models = ["deepseek-v4-flash"]

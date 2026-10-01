@@ -230,6 +230,18 @@ def _write_config(tmp_path: Path, ws_url: str, extra: str = EXTRA_CONFIG) -> Pat
     text = text.replace('ws_url = "ws://127.0.0.1:3001"', 'ws_url = "' + ws_url + '"')
     text = text.replace("self_id = 0", "self_id = " + str(SELF_ID))
     text = text.replace('level = "INFO"', 'level = "ERROR"').replace("json = true", "json = false")
+    # The repository config already declares [perception.classify].  Appending
+    # another table header (as the replay overrides used to do) is invalid TOML.
+    # Merge replay overrides into the existing table instead, while retaining
+    # the append-only behavior for the extra tables used by the simulator.
+    mode_match = re.search(r"(?m)^\[perception\.classify\]\n", text)
+    if mode_match:
+        extra = re.sub(r"(?m)^\[perception\.classify\]\n", "", extra)
+        mode_match_value = re.search(r"(?m)^decision_mode = \"[^\"]+\"\n?", extra)
+        if mode_match_value:
+            decision_mode = mode_match_value.group(0)
+            extra = extra[:mode_match_value.start()] + extra[mode_match_value.end():]
+            text = text[:mode_match.end()] + decision_mode + text[mode_match.end():]
     path = tmp_path / "grouppig.toml"
     path.write_text(text + extra, encoding="utf-8")
     return path
@@ -377,6 +389,7 @@ async def simulate_group(
                     force_wait=float(options.get("force_wait") or 60.0),
                 )
             report["memory"] = await _memory_view(app)
+            report["activation"] = _activation_view(app)
             report["snapshot"] = _snapshot_view(app)
             report["pumps"] = _flatten_pumps(report["snapshot"].get("pumps"))
         finally:
@@ -488,6 +501,72 @@ async def _memory_view(app: GrouppigApp) -> dict[str, Any]:
     except Exception as error:  # noqa: BLE001
         view["chat_rows"] = "ERR:" + type(error).__name__
     return view
+
+
+def _activation_view(app: GrouppigApp) -> dict[str, Any]:
+    """提取激活网络的可审计摘要，不把真实群聊原文写进回放 artifact。"""
+
+    network = getattr(getattr(app, "perception", None), "activation", None)
+    if network is None:
+        return {"enabled": False, "groups": [], "events": [], "last": {}}
+    snapshot = network.snapshot()
+    events = []
+    for event in snapshot.get("events") or ():
+        events.append(
+            {
+                key: event.get(key)
+                for key in (
+                    "event_id",
+                    "group_id",
+                    "topic_id",
+                    "message_count",
+                    "momentum",
+                    "status",
+                    "bot_echo_count",
+                    "last_activity_at",
+                    "last_progress_at",
+                )
+                if key in event
+            }
+        )
+    last: dict[str, Any] = {}
+    for group_id in snapshot.get("groups") or ():
+        current = network.last(int(group_id)) or {}
+        event = current.get("event") or {}
+        energy = current.get("energy") or {}
+        participation = current.get("participation") or {}
+        last[str(group_id)] = {
+            "active": bool(current.get("active")),
+            "score": current.get("score"),
+            "reasons": list(current.get("reasons") or ()),
+            "hooks": dict(current.get("hooks") or {}),
+            "event": {
+                key: event.get(key)
+                for key in ("event_id", "topic_id", "new_messages", "status", "momentum", "topic_shifted")
+                if key in event
+            },
+            "energy": {
+                key: energy.get(key)
+                for key in ("allowed", "reason", "global_energy", "social_battery", "attention")
+                if key in energy
+            },
+            "participation": {
+                key: participation.get(key)
+                for key in ("status", "reason", "echoes")
+                if key in participation
+            },
+        }
+    memory = snapshot.get("memory") or {}
+    return {
+        "enabled": bool(snapshot.get("enabled")),
+        "bot_names": list(snapshot.get("bot_names") or ()),
+        "interest_tags": list(snapshot.get("interest_tags") or ()),
+        "groups": list(snapshot.get("groups") or ()),
+        "events": events,
+        "last": last,
+        "memory": {key: memory.get(key) for key in ("count", "stable", "sensitive") if key in memory},
+        "energy": snapshot.get("energy") or {},
+    }
 
 
 def _snapshot_view(app: GrouppigApp) -> dict[str, Any]:
@@ -688,6 +767,14 @@ def aggregate(reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "labels": Counter(),
         "reply_composed": 0,
         "stats": {},
+        "activation": {
+            "evaluations": 0,
+            "active": 0,
+            "events": 0,
+            "dormant": 0,
+            "memory_fragments": 0,
+            "stable_memory": 0,
+        },
         "interrupt_actions": Counter(),
         "tables": Counter(),
         "pumps": defaultdict(Counter),
@@ -713,6 +800,17 @@ def aggregate(reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 bucket.update({k: v for k, v in stats.items() if isinstance(v, (int, float))})
         total["session_completed"] += len(events.get("session") or ())
         total["labels"].update(_label_counts(report))
+        activation = report.get("activation") or {}
+        last = activation.get("last") or {}
+        total["activation"]["evaluations"] += len(last)
+        total["activation"]["active"] += sum(1 for item in last.values() if item.get("active"))
+        total["activation"]["events"] += len(activation.get("events") or ())
+        total["activation"]["dormant"] += sum(
+            1 for item in activation.get("events") or () if item.get("status") == "dormant"
+        )
+        memory = activation.get("memory") or {}
+        total["activation"]["memory_fragments"] += int(memory.get("count") or 0)
+        total["activation"]["stable_memory"] += int(memory.get("stable") or 0)
         for item in events.get("interrupt") or ():
             total["interrupt_actions"][str(item.get("action") or item.get("reason") or "?")] += 1
         for name, count in ((report.get("memory") or {}).get("tables") or {}).items():
@@ -803,6 +901,20 @@ def scorecard(total: Mapping[str, Any], probes: Mapping[str, Any] | None = None)
     )
     decision = (total.get("stats") or {}).get("decision") or {}
     aggregator = (total.get("stats") or {}).get("aggregator") or {}
+    activation = total.get("activation") or {}
+    add(
+        "perception",
+        "多钩子激活 / 事件线 / 精力",
+        grade(int(activation.get("evaluations") or 0) > 0, int(activation.get("events") or 0) > 0),
+        "激活评估 {} 次；活跃 {}；事件线 {}（dormant={}）；碎片记忆 {} / 稳定 {}".format(
+            activation.get("evaluations"),
+            activation.get("active"),
+            activation.get("events"),
+            activation.get("dormant"),
+            activation.get("memory_fragments"),
+            activation.get("stable_memory"),
+        ),
+    )
     add(
         "perception",
         "插话时机决策",
@@ -897,6 +1009,7 @@ def render_text(report: Mapping[str, Any], *, verbose: bool = False) -> str:
         )
         lines.append("        行为类别分布 {}".format(total.get("labels")))
         lines.append("        插话判定分布 {}".format(total.get("interrupt_actions")))
+        lines.append("        激活网络 {}".format(total.get("activation")))
         tables = {k: v for k, v in (total.get("tables") or {}).items() if v}
         lines.append(f"        落库非空表 {tables}")
         for name, stats in sorted((total.get("pumps") or {}).items()):
@@ -1269,7 +1382,11 @@ async def run(options: Mapping[str, Any]) -> dict[str, Any]:
                 f"回放：{corpus.name}（{end - start + 1} 条 / {float(options.get('span') or 0):.0f}s 窗口）…",
                 flush=True,
             )
-        reports.append(await simulate_group(corpus, start, end, options={**options, "probe": index == 0}))
+        reports.append(
+            await simulate_group(
+                corpus, start, end, options={**options, "probe": bool(options.get("probe")) and index == 0}
+            )
+        )
 
     total = aggregate(reports)
     probes: dict[str, Any] = {}
@@ -1336,7 +1453,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print(render_text(report, verbose=bool(args.groups > 1)))
     graded = report.get("scorecard") or []
-    return 0 if all(item["verdict"] != "missing" for item in graded) else 1
+    # --no-probe 是有意跳过强制边探测，不应因为缺少探测证据把回放命令判失败。
+    return 0 if args.no_probe or all(item["verdict"] != "missing" for item in graded) else 1
 
 
 if __name__ == "__main__":

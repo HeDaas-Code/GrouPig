@@ -753,7 +753,7 @@ async def test_system1_escalates_instead_of_raising_when_laya_is_unavailable(
 
     assert result["source"] == "escalated"
     assert result["escalated_to"]["provider"] == "a6api"
-    assert result["escalated_to"]["model"] == "grok-4.6"
+    assert result["escalated_to"]["model"] == config.get("model.tasks.chat.model")
     assert len(escalation.calls) == 1
     assert server.hits == 1
 

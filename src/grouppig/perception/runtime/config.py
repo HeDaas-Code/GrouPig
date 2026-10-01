@@ -78,6 +78,8 @@ DEFAULTS: dict[str, Any] = {
     "perception.classify.cascade_interrupt": True,
     "perception.classify.cascade_presets": True,
     "perception.classify.decision_mode": "active",
+    # 滞回保质期（秒）：在任行为保持超过这么久后，滞回不再阻拦切换（见 DEFAULT_STICKY_TTL）。
+    "perception.classify.sticky_ttl": 180.0,
     # normalizer.cleaner 的下游级联开关
     "perception.normalizer.cascade": True,
     # interrupt
@@ -87,6 +89,11 @@ DEFAULTS: dict[str, Any] = {
     "perception.interrupt.threshold": 0.55,
     "perception.interrupt.weights": DEFAULT_INTERRUPT_WEIGHTS,
     "perception.interrupt.trigger_flow": True,
+    # 决定开口即记一次发言（不记的话冷却闸门是死代码，见 decision.DEFAULT_RECORD_ON_SPEAK）。
+    "perception.interrupt.record_on_speak": True,
+    # 提问密度折让（见 decision.DEFAULT_QUESTION_RATIO_MIN）：不动权重，只降门槛。
+    "perception.interrupt.question_ratio_min": 0.34,
+    "perception.interrupt.question_discount": 0.08,
 }
 
 

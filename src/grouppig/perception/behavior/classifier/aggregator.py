@@ -51,6 +51,18 @@ DEFAULT_CASCADE_PRESETS = True
 DEFAULT_SWITCH_MARGIN = 0.1
 #: 切换滞回：候选行为连续出现这么多次后，即使置信度不占优也接受（保证真实变化能落地）。
 DEFAULT_SWITCH_CONFIRMATIONS = 3
+#: 滞回**保质期**（秒）：在任行为保持超过这么久之后，滞回不再阻拦切换。
+#:
+#: 滞回的目的是**防抖动**，不是把状态冻结。只有 margin 与 confirmations 两条判据时，
+#: 一个高置信度的在任行为（典型是 ``flooding``，规则引擎给 0.875）可以永久赖着不走：
+#: 任何候选都够不到 ``0.875 + 0.1 = 0.975``，``resolved`` 取代 ``resolved`` 不成立，
+#: 持续性又要求同一个候选连续出现 3 次 —— 于是「刷过屏的群」被判成永久刷屏，
+#: 而 ``flooding`` 会让插话评分直接 ``hold``：**该群从此再也不会被主动开口**。
+#: 实测（连灌 爬山 / 狂笑 / 打游戏 / 问号 四种迥异风格）：进入 flooding 后行为再不变化。
+#:
+#: 加保质期之后，在任者到期即让位；每次切换都会重置计时，所以抖动最多 TTL 一次 ——
+#: 自我限流，不需要额外的速率控制。
+DEFAULT_STICKY_TTL = 180.0
 
 
 class BehaviorAggregator:
@@ -74,6 +86,7 @@ class BehaviorAggregator:
         use_llm: bool | None = None,
         switch_margin: float | None = None,
         switch_confirmations: int | None = None,
+        sticky_ttl: float | None = None,
         decision_mode: str | None = None,
     ) -> None:
         self.registry = calls_module.registry_of(registry)
@@ -125,6 +138,14 @@ class BehaviorAggregator:
                 )
             ),
         )
+        self.sticky_ttl = max(
+            0.0,
+            float(
+                sticky_ttl
+                if sticky_ttl is not None
+                else config_module.number(config, "perception.classify.sticky_ttl", DEFAULT_STICKY_TTL)
+            ),
+        )
         self._current: dict[int, str] = {}
         self._last: dict[int, dict[str, Any]] = {}
         # 滞回记账：在任行为的置信度 / 确定性，以及候选行为的连续出现次数。
@@ -132,6 +153,9 @@ class BehaviorAggregator:
         self._resolved: dict[int, bool] = {}
         self._candidate: dict[int, str] = {}
         self._streak: dict[int, int] = {}
+        #: 在任行为是**什么时候**落地的（时间戳）。滞回保质期靠它算年龄；
+        #: 只有真正切换成功时才刷新，被滞回拦下的一轮不算「在任者变新了」。
+        self._since: dict[int, float] = {}
         self._profile: Mapping[str, Any] | None = None
         self.stats: dict[str, int] = {
             "classified": 0,
@@ -160,6 +184,7 @@ class BehaviorAggregator:
         incumbent_resolved: bool,
         streak: int,
         streak_behavior: str,
+        incumbent_age: float = 0.0,
     ) -> bool:
         """滞回判据：候选行为能否顶掉在任行为（纯函数）。
 
@@ -167,12 +192,20 @@ class BehaviorAggregator:
         ``smalltalk``（conf 0.45, resolved=False），这个低置信度默认值反复顶掉已确定的
         ``exposition``（conf 0.60-0.99, resolved=True），10 次切换里有一次 4 秒内就反悔。
         故：确定性可以取代不确定性，反之必须靠置信度边际或持续性赢得切换。
+
+        ``incumbent_age`` 是在任行为已经保持了多久（秒）。超过 ``sticky_ttl`` 之后滞回
+        让位 —— 理由见 ``DEFAULT_STICKY_TTL``：没有保质期的话，一个高置信度在任行为
+        （``flooding`` 0.875）永远无法被顶掉，而它会直接把插话评分压成 ``hold``，
+        等于把这个群**永久静音**。切换成功会重置计时，所以抖动上限是「每 TTL 一次」。
         """
 
         if not incumbent:
             return True
         # 安全例外：刷屏必须立刻反映，否则会在刷屏中插话（等于喂噪）。
         if candidate == "flooding":
+            return True
+        # 保质期：在任者已经赖够久了，滞回的使命（防抖动）已经完成，让位。
+        if self.sticky_ttl > 0 and float(incumbent_age) >= self.sticky_ttl:
             return True
         if resolved and not incumbent_resolved:
             return True
@@ -217,11 +250,13 @@ class BehaviorAggregator:
         previous_resolved: bool = False,
         streak: int = 0,
         streak_behavior: str = "",
+        incumbent_age: float = 0.0,
     ) -> dict[str, Any]:
         """融合规则与模型结论（纯函数）。
 
         ``streak`` / ``streak_behavior`` 是「上一轮候选行为连续出现的次数」及其行为名
         （由 :meth:`classify` 记账）；只有当它与本轮候选一致时才算数。
+        ``incumbent_age`` 是在任行为已保持的秒数，供滞回保质期判定。
         返回的 ``confidence`` / ``resolved`` 描述的是**候选**（本轮融合结论），
         ``behavior`` 是**生效**行为（滞回生效时等于在任者），``sticky`` 标记是否被滞回拦下。
         """
@@ -259,6 +294,7 @@ class BehaviorAggregator:
         candidate = behavior
         raw_changed = bool(candidate) and incumbent != candidate
         sticky = False
+        expired = False
         if raw_changed and not self._should_switch(
             candidate=candidate,
             confidence=confidence,
@@ -268,13 +304,20 @@ class BehaviorAggregator:
             incumbent_resolved=bool(previous_resolved),
             streak=int(streak or 0),
             streak_behavior=str(streak_behavior or ""),
+            incumbent_age=float(incumbent_age or 0.0),
         ):
             sticky = True
             behavior = incumbent
+        elif raw_changed and self.sticky_ttl > 0 and float(incumbent_age or 0.0) >= self.sticky_ttl:
+            # 这次切换是「保质期到了」放行的，不是边际/持续性赢的：单独标出来，
+            # 便于诊断「某个群为什么突然换了行为」。
+            expired = True
         return {
             "behavior": behavior,
             "candidate": candidate,
             "sticky": sticky,
+            "expired": expired,
+            "incumbent_age": round(float(incumbent_age or 0.0), 4),
             "confidence": round(min(0.99, max(0.0, confidence)), 4),
             "source": source,
             "resolved": resolved,
@@ -379,6 +422,9 @@ class BehaviorAggregator:
         previous = self._current.get(group, "")
         candidate_before = self._candidate.get(group, "")
         streak = self._streak.get(group, 0)
+        # 在任行为的年龄：没有记账（首次观测、或状态刚被外部重建）时算 0，
+        # 绝不因为「查不到起点」就把在任者当成过期 —— 那会在第一次分类时就抖一下。
+        incumbent_age = max(0.0, stamp - self._since.get(group, stamp)) if previous else 0.0
         decided = self.decide(
             rules=rules,
             llm=llm,
@@ -388,12 +434,15 @@ class BehaviorAggregator:
             previous_resolved=self._resolved.get(group, False),
             streak=streak,
             streak_behavior=candidate_before,
+            incumbent_age=incumbent_age,
         )
         self.stats["classified"] += 1
         if decided["changed"]:
             self.stats["changed"] += 1
         if decided["sticky"]:
             self.stats["sticky"] += 1
+        if decided["expired"]:
+            self.stats["expired"] = self.stats.get("expired", 0) + 1
         candidate = str(decided["candidate"])
         self._streak[group] = streak + 1 if candidate == candidate_before else 1
         self._candidate[group] = candidate
@@ -403,6 +452,10 @@ class BehaviorAggregator:
             self._confidence[group] = float(decided["confidence"])
             self._resolved[group] = bool(decided["resolved"])
         self._current[group] = str(decided["behavior"])
+        # 保质期计时只在**真正换了行为**时重置：候选与在任者相同的一轮不算「在任者变新」，
+        # 否则一个稳定的群会被每一轮分类无限续期，保质期永远到不了。
+        if str(decided["behavior"]) != previous:
+            self._since[group] = stamp
 
         payload: dict[str, Any] = {
             "group_id": int(group_id),

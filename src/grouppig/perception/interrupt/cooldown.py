@@ -180,12 +180,27 @@ class Cooldown:
         at: float | None = None,
         group_ids: Sequence[int] | None = None,
     ) -> dict[str, Any]:
-        """记录一次成功发言（清退避计数），返回刷新后的冷却状态。"""
+        """记录一次成功发言（清退避计数），返回刷新后的冷却状态。
+
+        **同一次发言重复记账只算一次**。决策器在 ``speak`` 时会自动记一笔
+        （见 ``decision.DEFAULT_RECORD_ON_SPEAK``：生产里没有别的调用方，
+        不自动记的话冷却闸门就是死代码），而设计原本还允许发送方在发送成功后
+        用 ``action="record"`` 再确认一次 —— 两笔是**同一次发言**，不该让
+        ``max_per_hour`` 的额度翻倍。
+
+        判据用 ``min_gap_seconds``：闸门保证两次真实发言至少隔这么久，
+        所以比它更近的记录必然是同一句话的回执。
+        """
 
         stamp = float(at if at is not None else self.clock())
         groups = list(group_ids) if group_ids else [int(group_id)]
         for group in groups:
             group = int(group)
+            previous = float(self._spoken.get(group, 0.0) or 0.0)
+            if previous and self.min_gap_seconds > 0 and (stamp - previous) < self.min_gap_seconds:
+                # 同一句话的回执：刷新时刻，但不新增一笔计数。
+                self._spoken[group] = max(previous, stamp)
+                continue
             self._spoken[group] = stamp
             history = self._history.setdefault(group, deque())
             history.append(stamp)

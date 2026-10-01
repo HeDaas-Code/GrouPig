@@ -46,12 +46,20 @@ INTEGRATION_FLAG_KEYS = (
     "demux_pump",
     "connect",
     "maintenance",
+    "idle_speak",
 )
 #: `[app.integration]` 里必须 > 0 的周期（秒）。
 #:
 #: 0 / 负数不是「跑得快一点」：`runtime/pumps.py` 把间隔钳到 0.0 后
 #: `asyncio.sleep(0)` 会变成忙循环（实测 0.3s 内 35846 拍，吃满一个核）。
-INTEGRATION_INTERVAL_KEYS = ("drain_interval", "profile_interval", "sweep_interval", "maintenance_interval")
+INTEGRATION_INTERVAL_KEYS = (
+    "drain_interval",
+    "profile_interval",
+    "sweep_interval",
+    "maintenance_interval",
+    "idle_interval",
+    "idle_seconds",
+)
 #: `[app.integration]` 里必须 >= 1 的计数。
 INTEGRATION_COUNT_KEYS = (
     "drain_batch",
@@ -59,6 +67,8 @@ INTEGRATION_COUNT_KEYS = (
     "profile_min_messages",
     "flow_max_steps",
     "retention_limit",
+    "idle_min_messages",
+    "idle_limit",
 )
 #: `[app.integration]` 里的嵌套配置表。
 INTEGRATION_TABLE_KEYS = ("session_options", "gateway_options")
@@ -186,6 +196,12 @@ def _check_integration_options(report: ValidationReport, config: Config) -> None
                 report.error("type", path, f"应为整数，得到 {type(value).__name__}（{value!r}）")
             elif value < 1:
                 report.error("range", path, f"应 >= 1，得到 {value}")
+        elif key == "idle_max_seconds":
+            # 0 = 不设上限（只按「窗口里还有近期消息」判断），所以只拦负数与类型。
+            if not _is_number(value):
+                report.error("type", path, f"应为数值（秒），得到 {type(value).__name__}（{value!r}）")
+            elif value < 0:
+                report.error("range", path, f"应 >= 0（0 表示不设上限），得到 {value}")
         elif key == "retention_keep_seconds":
             # 0 / 缺省 = 「用记忆层自己的 DEFAULT_KEEP_SECONDS」，所以这里只拦负数与类型。
             if not _is_number(value):

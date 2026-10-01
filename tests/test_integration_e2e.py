@@ -311,7 +311,7 @@ def test_cli_check_mode_reports_no_contract_gaps() -> None:
 
 
 async def test_create_app_builds_every_domain_and_pump(tmp_path: Path) -> None:
-    """一行入口 `create_app` 装齐八个域与四个驱动器，且契约零缺口。"""
+    """一行入口 `create_app` 装齐八个域与六个驱动器，且契约零缺口。"""
 
     async with integration(tmp_path) as (app, _server, _fake):
         assert app.started is True
@@ -322,6 +322,7 @@ async def test_create_app_builds_every_domain_and_pump(tmp_path: Path) -> None:
             "social.profile",
             "session.sweeper",
             "maintenance.retention",
+            "perception.idle_speak",
         }
         report = app.contract_check()
         assert report["missing"] == []
@@ -606,7 +607,7 @@ async def test_shutdown_stops_pumps_and_closes_the_container(tmp_path: Path) -> 
 
 
 async def test_start_is_idempotent_and_pumps_can_be_skipped(tmp_path: Path) -> None:
-    """`start()` 幂等；`pumps=False` 时四个驱动器一个都不建。"""
+    """`start()` 幂等；`pumps=False` 时六个驱动器一个都不建。"""
 
     server = MockOneBotServer(self_id=SELF_ID)
     url = await server.start()

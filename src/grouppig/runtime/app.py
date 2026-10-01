@@ -44,10 +44,26 @@ from grouppig.infra.runtime import contract as contract_module
 from grouppig.infra.runtime.di import Container, build_container
 from grouppig.infra.runtime.errors import GrouPigError
 from grouppig.runtime.errors import IntegrationError
-from grouppig.runtime.pumps import DrainPump, FlowDriver, MaintenancePump, ProfilePump, SessionSweeper
+from grouppig.runtime.pumps import (
+    DrainPump,
+    FlowDriver,
+    IdleSpeakPump,
+    MaintenancePump,
+    ProfilePump,
+    SessionSweeper,
+)
 
 #: 默认配置文件（相对路径；解析时先看 cwd，再顺着包的位置回到仓库根）。
 DEFAULT_CONFIG_PATH = "config/grouppig.toml"
+
+#: 启动路径上**不跑首拍**的泵（无论 `pump_first_tick_immediate` 怎么设）。
+#:
+#: * ``MaintenancePump``：一轮三个 DB 调用，慢；若在即时首拍里被留下半途（宿主跑完
+#:   ``start()`` 就停掉那个 loop —— pytest-asyncio 的异步夹具正是这么干的），它会攥着
+#:   ``SerializedConnection`` 的闸门不放，把之后**任何**跨 loop 的读库请求永久挂死。
+#: * ``IdleSpeakPump``：它会**发消息**。刚启动时画像、关系分、冷却记账都还没热起来，
+#:   没有理由在第一拍就替一个群决定「现在该说话了」。
+NO_FIRST_TICK: frozenset[str] = frozenset({MaintenancePump.name, IdleSpeakPump.name})
 
 #: 装配顺序（设计依赖方向：下游在前）。
 WIRING_ORDER: tuple[str, ...] = (
@@ -143,6 +159,18 @@ class IntegrationOptions:
     retention_keep_seconds: float | None = None
     #: 单轮衰减处理的词条 / 关系边上限。
     retention_limit: int = 300
+    #: 是否开启静默唤醒（给「安静下来的群」补第二个插话触发时机）。
+    idle_speak: bool = True
+    #: 静默唤醒巡检周期（秒）。
+    idle_interval: float = 60.0
+    #: 群安静多久算「静下来了」（秒）。低于它说明还在热聊，交给行为变化那条线。
+    idle_seconds: float = 150.0
+    #: 静默多久以上就不再唤醒（秒）；防止重启后对着几小时前的旧话题诈尸。
+    idle_max_seconds: float = 1800.0
+    #: 窗口里至少要有这么多条消息才算「活群」。
+    idle_min_messages: int = 2
+    #: 单轮最多评分几个群（按静默时长升序，先照顾刚静下来的）。
+    idle_limit: int = 20
     #: 单条心流最多推几步（防止结构步骤异常时死循环）。
     flow_max_steps: int = 8
     #: 回复发送只走 `kafka:grouppig.reply.composed`（`True`）还是 `rpc:flow.end(send=True)`。
@@ -193,6 +221,12 @@ class IntegrationOptions:
             maintenance=_flag(config, "app.integration.maintenance", True),
             retention_keep_seconds=_number(config, "app.integration.retention_keep_seconds", 0.0) or None,
             retention_limit=_integer(config, "app.integration.retention_limit", 300),
+            idle_speak=_flag(config, "app.integration.idle_speak", True),
+            idle_interval=_number(config, "app.integration.idle_interval", 60.0),
+            idle_seconds=_number(config, "app.integration.idle_seconds", 150.0),
+            idle_max_seconds=_number(config, "app.integration.idle_max_seconds", 1800.0),
+            idle_min_messages=_integer(config, "app.integration.idle_min_messages", 2),
+            idle_limit=_integer(config, "app.integration.idle_limit", 20),
             flow_max_steps=_integer(config, "app.integration.flow_max_steps", 8),
             flow_send_via_topic=_flag(config, "app.integration.flow_send_via_topic", True),
             pumps=_flag(config, "app.integration.pumps", True),
@@ -221,6 +255,12 @@ class IntegrationOptions:
             "maintenance": self.maintenance,
             "retention_keep_seconds": self.retention_keep_seconds,
             "retention_limit": self.retention_limit,
+            "idle_speak": self.idle_speak,
+            "idle_interval": self.idle_interval,
+            "idle_seconds": self.idle_seconds,
+            "idle_max_seconds": self.idle_max_seconds,
+            "idle_min_messages": self.idle_min_messages,
+            "idle_limit": self.idle_limit,
             "flow_max_steps": self.flow_max_steps,
             "flow_send_via_topic": self.flow_send_via_topic,
             "pumps": self.pumps,
@@ -232,7 +272,7 @@ class IntegrationOptions:
 
 @dataclass
 class GrouppigApp:
-    """单进程闭环：一个容器 + 八个域 + 五个泵。"""
+    """单进程闭环：一个容器 + 八个域 + 六个泵。"""
 
     container: Container
     options: IntegrationOptions = field(default_factory=IntegrationOptions)
@@ -248,6 +288,7 @@ class GrouppigApp:
     profile_pump: ProfilePump | None = None
     session_sweeper: SessionSweeper | None = None
     maintenance_pump: MaintenancePump | None = None
+    idle_pump: IdleSpeakPump | None = None
     started_at: float = 0.0
     _started: bool = False
 
@@ -275,6 +316,7 @@ class GrouppigApp:
                 self.profile_pump,
                 self.session_sweeper,
                 self.maintenance_pump,
+                self.idle_pump,
             )
             if pump is not None
         )
@@ -338,7 +380,7 @@ class GrouppigApp:
 
     # ---- 驱动泵 --------------------------------------------------------
     def start_pumps(self) -> tuple[Any, ...]:
-        """拉起五个泵（幂等）。"""
+        """拉起六个泵（幂等）。"""
 
         logger = getattr(self.container, "logger", None)
         bus = getattr(self.container, "bus", None)
@@ -382,6 +424,18 @@ class GrouppigApp:
                 decay_limit=self.options.retention_limit,
                 logger=logger,
             )
+        if self.idle_pump is None and self.options.idle_speak:
+            self.idle_pump = IdleSpeakPump(
+                self.container,
+                window=getattr(self.perception, "window", None),
+                interval=self.options.idle_interval,
+                idle_seconds=self.options.idle_seconds,
+                max_idle_seconds=self.options.idle_max_seconds,
+                min_messages=self.options.idle_min_messages,
+                limit=self.options.idle_limit,
+                self_id=self.self_id,
+                logger=logger,
+            )
         immediate = self.options.pump_first_tick_immediate
         for pump in self.pumps:
             if pump.name == FlowDriver.name:
@@ -391,8 +445,8 @@ class GrouppigApp:
             # 停掉那个 loop —— pytest-asyncio 的异步夹具正是这么干的），它会攥着
             # `SerializedConnection` 的闸门不放，把之后**任何**跨 loop 的读库请求
             # 永久挂死（实测：面板的同步快照被冻住，全量套件卡在 60%）。
-            # 所以无论全局开关怎么设，它都跳过首拍。
-            pump.start(immediate=immediate and pump.name != MaintenancePump.name)
+            # 静默唤醒泵同理跳过首拍，另外它还会发消息。见 `NO_FIRST_TICK`。
+            pump.start(immediate=immediate and pump.name not in NO_FIRST_TICK)
         return self.pumps
 
     @property

@@ -152,7 +152,7 @@ QQ 群消息
   → reflection                    复盘 → 洞察 → 策略 → 预设库
 ```
 
-其中五个**驱动器（泵）**是设计树里没写、但集成层必须补的东西——
+其中六个**驱动器（泵）**是设计树里没写、但集成层必须补的东西——
 设计只描述「谁依赖谁」，不描述「谁在什么时候调谁」：
 
 | 泵 | 周期/触发 | 不装它会怎样 |
@@ -162,6 +162,7 @@ QQ 群消息
 | `social.profile` | 30s | 画像与关系分永远是空的 |
 | `session.sweeper` | 60s | 群安静后没人触发归档，反思链路断掉 |
 | `maintenance.retention` | 3600s（跳过首拍） | 窗口索引只增不减、黑话只读不衰、「最近」这个语义不存在（三个清理接口零调用方） |
+| `perception.idle_speak` | 60s（跳过首拍） | 插话评分只有 `behavior.changed` 一条入边，而分类器带滞回 → **每个群一辈子只被打一次分**，一场对话只说一句 |
 
 ### 3.3 群里的命令
 
@@ -197,7 +198,7 @@ uv run python -m grouppig.runtime --panel           # 机器人与面板同进�
 
 ```python
 app.contract_check()                              # 与 api-index 逐字比对：missing / unknown
-await app.health()                                # 各域健康 + 五个泵状态
+await app.health()                                # 各域健康 + 六个泵状态
 app.status()                                      # 同步轻量状态
 await app.drain_once()                            # 手工排空一次感知缓冲
 await app.end_session(group_id, reason="manual")  # 显式收尾 → 归档 → 反思
@@ -217,7 +218,15 @@ await app.end_session(group_id, reason="manual")  # 显式收尾 → 归档 → 
 > （`tools/smoke.py:161`），然后 `scenario_closed_loop` 直接调
 > `rpc:interrupt.decide(score=0.9, ...)`（`:505-511`）来逼出一条回复。
 > 所以冒烟全绿**不代表**「无人 @ 时它自己会开口」这条链路是通的——它绕过了整条评分链路。
-> 判断主动开口能力必须用**出厂配置**跑真实链路（方法见 §7.4 第 3 条）。
+> 判断主动开口能力必须用**出厂配置**跑真实链路（方法见 §8 第 3 条）。
+
+**怎么测「它会不会主动说话」**（本批四处改动都用这个方法验收）：起完整 app + **出厂配置**
++ 假 OneBot 服务端，**只订阅事件总线取证，绝不替换注册表条目**，然后灌一段真实群聊、
+把时钟推后、数 `kafka:grouppig.interrupt.triggered` 与 `send_group_msg` 的条数。
+
+> **⚠ 别用「替换注册表条目」的方式做探针**。把 `rpc:normalizer.features` 或
+> `rpc:behavior.classify` 用 `registry.register(..., replace=True)` 包一层，
+> 会**打断真实级联**，读出假的 `features: 'failed'`。取证只用总线订阅（零侵入）。
 
 ---
 
@@ -285,6 +294,8 @@ await app.end_session(group_id, reason="manual")  # 显式收尾 → 归档 → 
 | **多气泡拟人节奏** | 规划器产出多份草稿、此前丢掉除最后一份外的全部；`flow.end` 现在发有序气泡列表，composer 按长度插入延迟（延迟可注入、默认关闭，避免拖慢测试） |
 | **反思闭环接通** | `generate_strategy` 从未被传 `True`，`rpc:strategy.*` / `rpc:presets.register` 零生产调用方。现在会话收尾会生成并注册策略，预设库随会话增长 |
 | **并发双发** | `flow.end` 的幂等发送是跨 `await` 的 check-then-act，无锁；`FlowDriver` 对每个触发事件都 `create_task`、无按群去重。实测两个并发 `flow.end` → 2 次发送 / 2 次发布 |
+| 高 | 插话冷却闸门是死代码：`Cooldown.record()` 无生产调用方 → `allowed` 恒真、`max_per_hour` 不可达 | 决策点即记账（`record_on_speak`）+ 重复回执去重（`interrupt/decision.py`、`cooldown.py`） |
+| 中 | 一场对话只开口一次：插话评分只由 `behavior.changed` 触发，而该事件每群只发一次 | 新增 `IdleSpeakPump`（`perception.idle_speak`）+ 行为滞回保质期 `sticky_ttl`（`runtime/pumps.py`、`behavior/classifier/aggregator.py`） |
 
 ### 6.4 第四批：数据完整性、提示词安全、保留策略（已提交）
 
@@ -297,6 +308,23 @@ await app.end_session(group_id, reason="manual")  # 显式收尾 → 归档 → 
 | **保留策略泵** | 新增第五个泵 `maintenance.retention`，驱动三个零调用方的清理接口（窗口索引 / 黑话 / 关系分衰减）。此前**能力存在但永不发生**：跑得越久库越大、词表越臃肿、「最近」这个语义不存在 |
 | **`auto_escape` 断链**（中） | 它只出现在文档和适配器签名里，中间没人接：`wrap` 用 `**_` 静默吞掉 → 运维照文档传了也没用。已从 payload 一路透传到适配器（多气泡路径每条都带） |
 | **一处真实死锁**（自测发现） | 保留策略泵的**即时首拍**会攥住 memory 的 `SerializedConnection` 闸门；宿主（pytest-asyncio 夹具）跑完 `start()` 就停掉那个 loop，任务被留在半途 → 闸门永不释放，**任何**跨 loop 的读库永远等待。实测全量套件卡在 60% 不动。已修：保留策略无论全局开关怎么设都跳过首拍；同时给面板的同步读表加超时上界（面板是排查工具，卡死比读不到表更糟） |
+
+### 6.5 第五批：让它真的会主动说话（已提交）
+
+背景：§8 第 3 条的实测更正说明「它其实会开口，只是一场对话只说一句」。这一批把「说一句」
+变成「该说的时候说得上话」，共四处改动，全部**不新增契约名字**。
+
+| 项 | 内容 |
+| --- | --- |
+| **静默唤醒泵**（新能力） | 插话评分在设计树里**只有一条入边** `kafka:grouppig.behavior.changed`。新增 `IdleSpeakPump`（`perception.idle_speak`，默认 60s、跳过首拍）：挑出「窗口里还有近期消息、但已静默 ≥ `idle_seconds`(150s)」的群，对它们调 `rpc:interrupt.score(decide=True)`。静默时长有**上下界**——太短（还在热聊）不碰，超过 `idle_max_seconds`(1800s)（群早散了）也不碰。它**只敲门、不判定**：该不该说仍由 `score` → `decide` 全权决定 |
+| **行为滞回保质期**（高） | 滞回原有两条判据（置信度边际 + 持续性）都挡不住**高置信度的在任行为**：规则引擎给 `flooding` 0.875，任何候选够不到 `0.975`；持续性又要求同一候选连续 3 次，而真实群聊候选每轮都在变。于是「刷过屏的群」被判成**永久刷屏**，而 `flooding` 让插话评分直接 `hold` → **该群再也不会被主动开口**。新增 `sticky_ttl`(180s)：在任者到期即让位，每次切换重置计时（抖动上限 = 每 TTL 一次，自我限流）。`sticky_ttl=0` 逐位恢复旧行为 |
+| **提问密度折让**（新能力） | `question_ratio` 一直由特征编码器算出来（逐条 `is_question`），却**没有任何消费方**——满屏「这怎么弄？」的群和满屏闲聊的群拿到同一个阈值。改为复用「被点名」那套机制（**降门槛而非加分**，所以非提问窗口的分数逐位不变）：占比 ≥ `question_ratio_min`(0.34) 时阈值降 `question_discount`(0.08)，地板 `QUESTION_FLOOR`(0.15)。与点名折让**互斥**，避免叠加压穿 |
+| **冷却记账**（高，被新泵暴露） | 设计原意是「发送成功后由调用方用 `action="record"` 回写」，但**生产里没有任何调用方**（`record_spoken` 在 `decision.py` 之外零命中）→ 冷却闸门形同虚设、`max_per_hour` 永远不可达。这个缺陷长期不可见（原本一场对话只打一次分），接上静默唤醒泵后立刻变成**每拍说一句**——实测 30 秒内发了 14 条消息。改为**决定开口即记账**（`record_on_speak`，默认开），并让同一次发言的重复回执**只算一笔**（按 `min_gap_seconds` 判重，避免额度翻倍） |
+
+> **这一批的教训值得记下来**：把两个各自「看起来没问题」的缺陷接在一起，会得到一个
+> 谁都没预料到的放大后果。冷却记账缺失在旧触发模型下完全无害（一场对话只评一次分），
+> 一旦接上周期泵就变成刷屏。所以新能力上线前必须端到端跑一遍**真实配置**，
+> 而不是只看单元测试——本批的限流失效正是端到端跑出来的（`1231 passed` 时它还在）。
 
 ---
 
@@ -312,9 +340,9 @@ await app.end_session(group_id, reason="manual")  # 显式收尾 → 归档 → 
 
 见 §6.1。
 
-### 7.2 已修复（v0.2 第二、三、四批）
+### 7.2 已修复（v0.2 第二、三、四、五批）
 
-三批施工共修掉 §7 的 **28 条**（含全部 4 条 blocker）。逐条证据见 §6.2 / §6.3 与各次提交信息；
+四批施工共修掉 §7 的 **31 条**（含全部 4 条 blocker）。逐条证据见 §6.2 ~ §6.5 与各次提交信息；
 每条都先复现、先红后绿，并做**变异自检**（把实现还原回去，对应用例必须恰好变红）。
 
 | 原级别 | 问题 | 修法落点 |
@@ -353,8 +381,6 @@ await app.end_session(group_id, reason="manual")  # 显式收尾 → 归档 → 
 | --- | --- | --- |
 | 高 | **表情包狂欢被误判为刷屏**：不同 face 段的指纹相同 → `repeat_ratio 0.9` → `flooding=True` → 机器人闭嘴。反向也瞎：媒体内容不进提示词，`image_segment()` 定义了从不使用 | `perception/normalizer/text.py:40-54`；`verdict.py:106-119` |
 | 高 | **配置热更新是死的**：`start_reloader` 从未被调用，面板只读（POST→501）→ 改配置必须重启 | `infra/runtime/di.py:97-119` |
-| 高 | **插话冷却每小时上限仍不可达**：`Cooldown.record()` 没有生产调用方（`scorer.py` 一侧已修，见上表） | `interrupt/cooldown.py:176-194` |
-| 中 | **一场对话只开口一次**：插话评分**只由 `kafka:grouppig.behavior.changed` 触发**，而该事件实际只在「首次观测」时发一次（后续候选行为被 `_should_switch` 的粘滞判定挡回——实测连续灌入 4 种风格迥异的群聊，行为只切换 1 次）。于是每群只有一次被打分的机会，60s 冷却过后再也没有第二次触发源。**注意：不是「从不说话」**，详见 §7.4 的更正 | `behavior/classifier/aggregator.py:255-282`、`interrupt/scorer.py` |
 | 中 | 没有群/用户白黑名单，也没有默认全局发送上限 → 加 N 个群就是 N × 20 条/分钟 | `gateway/sender` |
 | 中 | 关停无优雅排空：SIGTERM 时队列里的入站消息静默消失，且不记残余深度 | `gateway/adapter/connector.py` |
 | 中 | 没有 readiness 探针；`/api/health` 太浅（泵全死、QQ 断线也报 ready） | `panel/web.py` |
@@ -393,7 +419,7 @@ await app.end_session(group_id, reason="manual")  # 显式收尾 → 归档 → 
 | `rpc:speech.advise/.tailor` | **个性化是硬编码常量**——对每个成员都建议 😄 和「啦」（lexicon 的统计信封被塞进了 adapter 期望的槽位） |
 | `perception/runtime/decision_cache.py`、`decision_packet.py` | **死模块**（`src/` 内零引用）。前者里的 `flow_idempotency_key()` / `SingleFlight` 正是为 §7.2 的双发问题写的，却从未接线 |
 | `cleaner` 的 `risky` / `risk_labels` | 算出来了没人消费 → 对诈骗/博彩/加群话术没有任何反应 |
-| `question_ratio` / `is_question` | 算出来了没人消费 → 少了最自然的「有人问问题，去回答」触发器 |
+| `question_ratio` / `is_question` | ~~算出来了没人消费~~ → **已消费**：占比 ≥ 0.34 时降阈值 0.08（§6.5）。`is_question` 逐条标记仍只用于汇总成占比 |
 | `style_hints["length_hint_avg"]` | 被 3 处消费、**从未被生产** → 长度评分恒为常量，每条回复都被追加语气词 |
 | `kafka:grouppig.topic.changed` | **零订阅者**，发布进虚空 |
 | `kafka:grouppig.social.changed` | 只有 social 层内部的调试日志订阅 |
@@ -418,16 +444,17 @@ await app.end_session(group_id, reason="manual")  # 显式收尾 → 归档 → 
 
 ### 已经做完的（别再排一遍）
 
-关系分层接进提示词、并发双发、多气泡节奏、`MaintenancePump`、提示词注入围栏 ——
-全部已落地，见 §6.2 / §6.3 与 §7.2。
+关系分层接进提示词、并发双发、多气泡节奏、`MaintenancePump`、提示词注入围栏、
+**静默唤醒泵**、**行为滞回保质期**、**提问密度折让**、**插话冷却记账** ——
+全部已落地，见 §6.2 ~ §6.5 与 §7.2。
 
 ### 建议接下来做
 
 1. **消费 `cleaner` 的 `risky` / `risk_labels`**（§7.4）。这些标签**已经算出来了**，
    只是没人看：对诈骗、博彩、加群话术目前没有任何反应。接上「高风险内容不进上下文、
    不参与画像」这条线，成本很低，收益是安全性。
-2. **启用 `question_ratio` / `is_question`**（§7.4）。也算好了没人用 —— 这是最自然的
-   「有人在问问题，去回答」触发器，比现在纯靠关键词打分合理得多。
+2. ~~**启用 `question_ratio` / `is_question`**（§7.4）。~~ **已完成**（§6.5）：
+   占比 ≥ 0.34 时阈值降 0.08（与点名折让互斥，地板 0.15）。非提问窗口逐位不变。
 3. **主动开口策略**（§7.2.1）。**此处更正此前版本的说法。** 早先写的是「它从不主动
    说话」，那是把**代码默认阈值 0.55** 当成了生效值；出厂 `config/grouppig.toml`
    把它覆盖成 **0.26**，实际是**会**开口的。端到端实测（完整 app + 出厂配置 + 假 OneBot
@@ -441,9 +468,16 @@ await app.end_session(group_id, reason="manual")  # 显式收尾 → 归档 → 
      实测连灌「爬山 / 狂笑 / 打游戏 / 问号」四种迥异风格，行为只在首次观测时切换一次。
      每群因此只有**一次**被打分的机会，之后 60s 冷却一过也没有第二次触发源。
 
-   所以真正该做的不是「让它敢说话」（它敢），而是**给它更多、更合理的触发时机**：
-   接上 `question_ratio`（第 2 条）、给静默超 N 秒的群一个低频评分泵、把粘滞判定放宽到
-   「置信度显著更高就允许切换」。**这条决定它的产品性格，值得单独设计。**
+   所以真正该做的不是「让它敢说话」（它敢），而是**给它更多、更合理的触发时机**。
+
+   **这一条已经做完**（§6.5），三处都落地了：接上 `question_ratio`（第 2 条）、
+   给静默超 150 秒的群一个 60s 低频评分泵（`perception.idle_speak`）、
+   把粘滞判定放宽成「在任者到期即让位」（`sticky_ttl = 180s`）。
+
+   **修复后实测**（完整 app + 出厂配置 + 假 OneBot 服务端，150 秒，不喂分）：
+   `interrupt.triggered` **3 次**，真的发出 **3 条**消息，间隔 ≈ 60 秒 ——
+   正好是冷却周期，说明限流在起作用（同一场景修复前只有 1 次）。
+   作为对照，**没有**冷却记账时同一场景 30 秒内会发 **14 条**。
 4. **媒体链路的两个反向缺陷**（§7.2.1 高）。不同表情包指纹相同 → 被误判为刷屏而闭嘴；
    同时图片内容根本不进提示词。要么修指纹，要么把媒体降级成「不参与刷屏判定」。
 5. **配置热更新**（§7.2.1 高）：`start_reloader` 从未被调用，面板 POST→501。

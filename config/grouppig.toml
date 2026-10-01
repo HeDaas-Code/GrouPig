@@ -29,6 +29,18 @@ heartbeat_interval = 30.0
 renormalize = true
 # A3 跨群实测：0.26 是四群都能开口且未退化成每轮开口的最高稳定点。
 threshold = 0.26
+# 提问密度折让：窗口里提问占比达到 question_ratio_min 时阈值下调 question_discount。
+# question_ratio 一直由特征编码器算出来（逐条 is_question），此前没有任何消费方 ——
+# 满屏「这怎么弄？」的群和满屏闲聊的群拿到同一个阈值。与「被点名折让」同一机制：
+# 降门槛而不是加分，所以非提问窗口的分数逐位不变。
+question_ratio_min = 0.34
+question_discount = 0.08
+
+[perception.classify]
+# 滞回保质期（秒）：在任行为保持超过这么久后，滞回不再阻拦切换。
+# 滞回只防抖动，不该把状态冻结 —— 没有它，一个高置信度的 flooding（0.875）
+# 永远无法被顶掉，而 flooding 会让插话评分直接 hold，等于把这个群永久静音。
+sticky_ttl = 180.0
 
 [model]
 default_provider = "a6api"
@@ -146,3 +158,14 @@ maintenance = true
 maintenance_interval = 3600.0   # 秒；清理是慢活，不必勤跑
 retention_limit = 300           # 单轮衰减处理的词条 / 关系边上限
 # retention_keep_seconds = 7200.0  # 过期窗口保留时长（秒）；注释掉 = 用记忆层默认值
+#
+# 静默唤醒（perception.idle_speak）：插话评分在设计树里只有 behavior.changed 一条入边，
+# 而行为分类器带滞回 —— 一场连贯的群聊里行为往往从头不变，于是每个群一辈子只被打一次分，
+# 冷却过后再无第二次触发源。这个泵按「群静下来了」补触发：窗口里还有近期消息（是活群），
+# 但已经安静够久。它只负责**敲门**，该不该开口仍由 rpc:interrupt.score → decide 全权决定。
+idle_speak = true
+idle_interval = 60.0        # 秒；巡检节拍
+idle_seconds = 150.0        # 群安静超过这么久才算「静下来了」
+idle_max_seconds = 1800.0   # 安静超过这么久就不再唤醒（别对着几小时前的旧话题诈尸）
+idle_min_messages = 2       # 窗口里至少这么多条才算活群
+idle_limit = 20             # 单轮最多评分几个群（按静默时长升序）

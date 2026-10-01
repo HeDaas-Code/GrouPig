@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -44,6 +45,8 @@ RPC_SESSION_UPDATE = "rpc:session.update"
 RPC_CHAT_WINDOW_PRUNE = "rpc:chat.window.prune"
 RPC_SLANG_DECAY = "rpc:slang.decay"
 RPC_RELATIONSHIP_DECAY = "rpc:relationship.decay"
+#: 静默唤醒泵用到的名字（都已登记在契约里，不新增名字）。
+RPC_INTERRUPT_SCORE = "rpc:interrupt.score"
 
 TOPIC_MESSAGE_RECEIVED = "kafka:grouppig.qq.message.received"
 TOPIC_INTERRUPT_TRIGGERED = "kafka:grouppig.interrupt.triggered"
@@ -706,6 +709,149 @@ class MaintenancePump(_Pump):
         return {**super().status(), "keep_seconds": self.keep_seconds, "decay_limit": self.decay_limit}
 
 
+class IdleSpeakPump(_Pump):
+    """静默唤醒泵：给「安静下来的群」补上第二个插话触发时机。
+
+    设计树里插话评分（``rpc:interrupt.score``）**只有一条入边**：
+    ``kafka:grouppig.behavior.changed``。而行为分类器是带滞回的，一场连贯的群聊里
+    行为往往从头到尾不变 —— 于是每个群**一辈子只被打一次分**。实测（完整 app +
+    出厂配置 + 假 OneBot 服务端，3 轮共 12 条群聊，全程不喂分）：
+    ``interrupt.triggered`` 只发 1 次，之后 60s 冷却一过也再没有第二次触发源。
+    结果就是「一场对话只说一句」。
+
+    本泵按「群静下来了」这个信号补触发：滚动时间窗里**还有近期消息**（说明是个活群，
+    不是死群），但**已经安静够久**（``idle_seconds``）。这正是插话价值最高的时刻 ——
+    话题刚落地、没人抢话，而 ``silence`` 分量此时接近满值。
+
+    三条纪律：
+
+    * 只做**触发**，不做判定。该不该说、说什么，仍然由 ``rpc:interrupt.score`` →
+      ``rpc:interrupt.decide`` 全权决定（含冷却与每小时上限），本泵不越权。
+    * 静默时长有**上下界**：太短（还在热聊）不碰，太长（``max_idle_seconds``，群早散了）
+      也不碰 —— 否则重启后会对着几小时前的旧话题挨个诈尸。
+    * 与 ``MaintenancePump`` 同款：下游缺失/抛错只记账，绝不把泵带崩。
+    """
+
+    name = "perception.idle_speak"
+
+    def __init__(
+        self,
+        container: Any,
+        *,
+        window: Any = None,
+        interval: float = 60.0,
+        idle_seconds: float = 150.0,
+        max_idle_seconds: float = 1800.0,
+        min_messages: int = 2,
+        limit: int = 20,
+        self_id: int = 0,
+        logger: Any = None,
+    ) -> None:
+        super().__init__(interval=interval, logger=logger)
+        self.container = container
+        self.window = window
+        self.idle_seconds = max(0.0, float(idle_seconds))
+        self.max_idle_seconds = max(0.0, float(max_idle_seconds))
+        self.min_messages = max(1, int(min_messages))
+        self.limit = max(1, int(limit))
+        self.self_id = int(self_id)
+        self.stats.update({"runs": 0, "considered": 0, "scored": 0, "spoke": 0, "skipped": 0})
+
+    async def tick(self) -> dict[str, Any]:
+        return await self.speak_once()
+
+    def idle_groups(self) -> list[dict[str, Any]]:
+        """列出「活群但已静默」的群（纯读，不改任何状态）。
+
+        返回按**静默时长升序**排：刚静下来的群最值得先看（话题还热、人还在），
+        而 ``limit`` 截断时先丢掉那些已经冷了很久的。
+        """
+
+        snapshot = getattr(self.window, "snapshot", None)
+        if not callable(snapshot):
+            return []
+        try:
+            overview = snapshot()
+        except Exception:  # noqa: BLE001 - 窗口读失败不该拖垮泵
+            return []
+        groups = overview.get("groups") if isinstance(overview, Mapping) else None
+        rows: list[dict[str, Any]] = []
+        for group in groups or ():
+            try:
+                detail = snapshot(int(group))
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(detail, Mapping):
+                continue
+            count = int(detail.get("message_count") or 0)
+            silence = float(detail.get("silence_seconds") or 0.0)
+            # 窗口里没有近期消息 → 死群，或者早就超出窗口；两种都不该唤醒。
+            if count < self.min_messages:
+                continue
+            if silence < self.idle_seconds:
+                continue
+            if self.max_idle_seconds > 0 and silence > self.max_idle_seconds:
+                continue
+            rows.append({"group_id": int(group), "silence_seconds": round(silence, 4), "message_count": count})
+        rows.sort(key=lambda item: item["silence_seconds"])
+        return rows
+
+    async def speak_once(self, *, now: float | None = None) -> dict[str, Any]:
+        """跑一轮：对每个「静默够久的活群」请一次插话评分（是否开口由决策器定）。"""
+
+        tally = CallTally()
+        stamp = float(now if now is not None else time.time())
+        candidates = self.idle_groups()
+        self.stats["runs"] += 1
+        self.stats["considered"] += len(candidates)
+        spoke = 0
+        for item in candidates[: self.limit]:
+            result = await best_effort(
+                self.container.call,
+                RPC_INTERRUPT_SCORE,
+                int(item["group_id"]),
+                decide=True,
+                self_id=self.self_id,
+                now=stamp,
+                tally=tally,
+            )
+            if result is None:
+                continue
+            self.stats["scored"] += 1
+            decision = result.get("decision") if isinstance(result, Mapping) else None
+            if isinstance(decision, Mapping) and decision.get("speak"):
+                spoke += 1
+                self._log(
+                    "info",
+                    "idle_speak",
+                    group_id=item["group_id"],
+                    silence_seconds=item["silence_seconds"],
+                    score=decision.get("score"),
+                    reason=decision.get("reason"),
+                )
+        self.stats["spoke"] += spoke
+        self.stats["skipped"] += tally.skipped
+        if tally.failed:
+            self.stats["errors"] += tally.failed
+            self.stats["last_error"] = tally.errors[-1] if tally.errors else "idle score failed"
+        return {
+            "considered": len(candidates),
+            "scored": self.stats["scored"],
+            "spoke": spoke,
+            "groups": [item["group_id"] for item in candidates[: self.limit]],
+            "calls": tally.as_dict(),
+        }
+
+    def status(self) -> dict[str, Any]:
+        return {
+            **super().status(),
+            "idle_seconds": self.idle_seconds,
+            "max_idle_seconds": self.max_idle_seconds,
+            "min_messages": self.min_messages,
+            "limit": self.limit,
+        }
+
+
 __all__ = [
     "RPC_CHAT_WINDOW",
     "RPC_CHAT_WINDOW_PRUNE",
@@ -714,6 +860,7 @@ __all__ = [
     "RPC_FLOW_END",
     "RPC_FLOW_NEXT",
     "RPC_GRAPH_TIERING",
+    "RPC_INTERRUPT_SCORE",
     "RPC_RELATIONSHIP_ADJUST",
     "RPC_RELATIONSHIP_DECAY",
     "RPC_SESSION_UPDATE",
@@ -725,6 +872,7 @@ __all__ = [
     "CallTally",
     "DrainPump",
     "FlowDriver",
+    "IdleSpeakPump",
     "MaintenancePump",
     "ProfilePump",
     "SessionSweeper",

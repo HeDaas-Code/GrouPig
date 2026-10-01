@@ -52,12 +52,37 @@ REASON_COOLDOWN = "cooldown"
 REASON_FLOODING = "flooding"
 REASON_LOW_SCORE = "low_score"
 REASON_NEAR_THRESHOLD = "near_threshold"
+REASON_QUESTION = "question"
 
 DEFAULT_THRESHOLD = 0.55
 #: ``wait`` 区间宽度（阈值下沿）。
 WAIT_BAND = 0.1
 #: 被点名时的阈值折让。
 MENTION_DISCOUNT = 0.15
+
+#: 提问密度折让：窗口里提问占比达到 ``question_ratio_min`` 时，阈值下调 ``question_discount``。
+#:
+#: 依据是**有人真的在问问题**。``question_ratio`` 一直由
+#: ``rpc:behavior.features.encode`` 算出来（逐条 ``is_question`` 判定），但此前没有任何
+#: 消费方 —— 一个满屏「这怎么弄？」的群和一个满屏闲聊的群拿到同一个阈值。
+#: 与 ``MENTION_DISCOUNT`` 用同一套机制（降门槛而不是加分），好处是不动权重模型：
+#: 非提问窗口的分数**逐位不变**，回归面最小。
+DEFAULT_QUESTION_RATIO_MIN = 0.34
+DEFAULT_QUESTION_DISCOUNT = 0.08
+#: 折让后的阈值地板：任何折让都不该把门槛压到「几乎必说」。
+QUESTION_FLOOR = 0.15
+
+#: 决定开口时是否**立刻**记一次发言（开冷却、清退避）。
+#:
+#: 设计原意是「发送成功后由调用方用 ``action="record"`` 回写」（见模块 docstring），
+#: 但**生产里没有任何调用方**：``grep record_spoken src/`` 在 decision.py 之外零命中。
+#: 后果是冷却闸门形同虚设 —— ``check()`` 永远 ``allowed``，``max_per_hour`` 永远不可达。
+#:
+#: 这个缺陷长期不可见，因为插话评分原本只由 ``behavior.changed`` 触发，
+#: 一场对话通常只打一次分；接上静默唤醒泵之后它立刻变成**每拍都说一句**。
+#: 所以这里在决策点就记账：宁可「说了但没发出去」白占一个冷却名额，
+#: 也不能让限流器变成死代码。真正的发送回调仍可再调 ``action="record"``（幂等覆盖）。
+DEFAULT_RECORD_ON_SPEAK = True
 
 #: 记入退避计数的克制原因：只有「能说而选择不说」的判断才算，被闸门拦下的不算。
 DECLINE_REASONS: tuple[str, ...] = (REASON_LOW_SCORE, REASON_NEAR_THRESHOLD)
@@ -78,6 +103,9 @@ class InterruptDecision:
         bus: Any = None,
         cooldown: Cooldown | None = None,
         threshold: float | None = None,
+        question_ratio_min: float | None = None,
+        question_discount: float | None = None,
+        record_on_speak: bool | None = None,
         trigger_flow: bool | None = None,
         publish: bool = True,
         pause_seconds: float = 0.0,
@@ -93,10 +121,30 @@ class InterruptDecision:
             if threshold is not None
             else config_module.number(config, "perception.interrupt.threshold", DEFAULT_THRESHOLD)
         )
+        # 提问密度折让（见 DEFAULT_QUESTION_RATIO_MIN）：不动权重，只降门槛。
+        self.question_ratio_min = float(
+            question_ratio_min
+            if question_ratio_min is not None
+            else config_module.number(config, "perception.interrupt.question_ratio_min", DEFAULT_QUESTION_RATIO_MIN)
+        )
+        self.question_discount = max(
+            0.0,
+            float(
+                question_discount
+                if question_discount is not None
+                else config_module.number(config, "perception.interrupt.question_discount", DEFAULT_QUESTION_DISCOUNT)
+            ),
+        )
         self.trigger_flow = (
             bool(config_module.flag(config, "perception.interrupt.trigger_flow", True))
             if trigger_flow is None
             else bool(trigger_flow)
+        )
+        # 决定开口就记账（见 DEFAULT_RECORD_ON_SPEAK）：不记的话冷却闸门是死的。
+        self.record_on_speak = (
+            bool(config_module.flag(config, "perception.interrupt.record_on_speak", True))
+            if record_on_speak is None
+            else bool(record_on_speak)
         )
         self.publish = bool(publish)
         self.pause_seconds = float(pause_seconds)
@@ -122,6 +170,7 @@ class InterruptDecision:
         behavior: str = "",
         cooldown: Mapping[str, Any] | None = None,
         threshold: float | None = None,
+        features: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """据分数与冷却给出决策（纯函数）。"""
 
@@ -130,8 +179,26 @@ class InterruptDecision:
         limit = float(threshold if threshold is not None else self.threshold)
         mentioned = float(components.get("mentioned") or 0.0)
         flooding = behavior == "flooding" or bool(cooldown.get("flooding"))
+
+        # 提问密度折让。**与点名折让互斥**：被点名时那个信号更强、且已经有自己的折让，
+        # 两者叠加会把门槛压穿。提问占比取自 ``features``（编码器一直在算，此前无人消费）。
+        question_ratio = 0.0
+        raw_ratio = (features or {}).get("question_ratio")
+        try:
+            question_ratio = max(0.0, float(raw_ratio)) if raw_ratio is not None else 0.0
+        except (TypeError, ValueError):
+            question_ratio = 0.0
+        question_applied = (
+            mentioned < 0.9
+            and self.question_discount > 0
+            and self.question_ratio_min > 0
+            and question_ratio >= self.question_ratio_min
+        )
+
         if mentioned >= 0.9:
             limit = max(0.2, limit - MENTION_DISCOUNT)
+        elif question_applied:
+            limit = max(QUESTION_FLOOR, limit - self.question_discount)
 
         rate_limited = str(cooldown.get("state") or "") == STATE_RATE_LIMITED
         # 被点名是「不可以沉默」的信号：可越过冷却与退避，但越不过每小时的硬上限。
@@ -146,7 +213,7 @@ class InterruptDecision:
         elif score >= limit:
             action, reason = (
                 ACTION_SPEAK,
-                (REASON_MENTIONED if mentioned >= 0.9 else REASON_SCORE),
+                (REASON_MENTIONED if mentioned >= 0.9 else REASON_QUESTION if question_applied else REASON_SCORE),
             )
         elif score >= limit - WAIT_BAND and limit - WAIT_BAND > 0:
             action, reason = ACTION_WAIT, REASON_NEAR_THRESHOLD
@@ -164,6 +231,12 @@ class InterruptDecision:
             "pause_seconds": self.pause_seconds if action == ACTION_SPEAK else 0.0,
             "components": {key: float(value) for key, value in components.items()},
             "behavior": behavior,
+            "question": {
+                "ratio": round(question_ratio, 4),
+                "ratio_min": round(self.question_ratio_min, 4),
+                "applied": question_applied,
+                "discount": round(self.question_discount, 4) if question_applied else 0.0,
+            },
         }
 
     # ---- 主流程 --------------------------------------------------------
@@ -192,6 +265,7 @@ class InterruptDecision:
             components=detail.get("components") or {},
             behavior=behavior,
             cooldown=cooldown_payload,
+            features=features,
         )
         self.stats["decided"] += 1
         self.stats[payload["action"]] = self.stats.get(payload["action"], 0) + 1
@@ -246,6 +320,11 @@ class InterruptDecision:
             if flow_outcome.ok:
                 result["flow"] = flow_outcome.result
         result["downstream"] = calls_module.outcomes(results)
+        # 记账必须在 `cooldown_after` **之前**：否则返回的冷却状态还是「没说过话」的样子，
+        # 调用方（以及测试）看到 allowed=True 会以为下一次还能立刻再说。
+        if self.record_on_speak:
+            self.record_spoken(int(group_id), at=stamp)
+            result["recorded"] = True
         result["cooldown_after"] = self.cooldown.check(int(group_id), now=stamp)
         self._decisions[int(group_id)] = result
         return result
@@ -365,15 +444,20 @@ __all__ = [
     "ACTION_SPEAK",
     "ACTION_WAIT",
     "ACTIONS",
+    "DEFAULT_QUESTION_DISCOUNT",
+    "DEFAULT_QUESTION_RATIO_MIN",
     "DEFAULT_THRESHOLD",
     "DOWNSTREAM_FLOW",
     "MENTION_DISCOUNT",
     "MODULE_ID",
+    "DEFAULT_RECORD_ON_SPEAK",
+    "QUESTION_FLOOR",
     "REASON_COOLDOWN",
     "REASON_FLOODING",
     "REASON_LOW_SCORE",
     "REASON_MENTIONED",
     "REASON_NEAR_THRESHOLD",
+    "REASON_QUESTION",
     "REASON_SCORE",
     "RPC_DECIDE",
     "TOPIC_TRIGGERED",

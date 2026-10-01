@@ -1,7 +1,7 @@
 # GrouPig 端到端集成（grouppig.runtime）落地说明
 
 > 归属：`gateway-engineer`（任务 t10「端到端闭环集成」）。
-> 本文件描述**单进程闭环**的启动入口、装配顺序、五个驱动器，以及集成期发现并修掉的跨域缺陷。
+> 本文件描述**单进程闭环**的启动入口、装配顺序、六个驱动器，以及集成期发现并修掉的跨域缺陷。
 
 ## 1. 一行启动
 
@@ -24,7 +24,7 @@ uv run python -m grouppig.runtime --no-connect --no-pumps
 ```python
 from grouppig.runtime import create_app
 
-app = await create_app("config/grouppig.toml")   # 装配 + 连 OneBot + 拉起五个泵
+app = await create_app("config/grouppig.toml")   # 装配 + 连 OneBot + 拉起六个泵
 ...
 await app.aclose()
 ```
@@ -58,10 +58,10 @@ infra → memory → perception → session → social → reflection → expres
 | 7 | expression | `install_expression_domain` | 依赖 social（预设/画像）与 memory（上下文） |
 | 8 | gateway | `install`（`start=True`） | **最后**连 OneBot：连上就可能来消息，此时全链路必须已就绪 |
 
-## 3. 五个驱动器（`src/grouppig/runtime/pumps.py`）
+## 3. 六个驱动器（`src/grouppig/runtime/pumps.py`）
 
 设计树只描述「谁依赖谁」，不描述「**谁在什么时候调谁**」。缺的不是边，是**时钟与触发器**。
-所以集成层补了五个驱动器：
+所以集成层补了六个驱动器：
 
 | 泵 | 名字 | 触发 | 干什么 | 没有它会怎样 |
 | --- | --- | --- | --- | --- |
@@ -70,6 +70,7 @@ infra → memory → perception → session → social → reflection → expres
 | `ProfilePump` | `social.profile` | 周期（默认 30s）+ 入站消息记账 | `rpc:chat.window` → 事实/立场抽取 + 说话画像 + 关系分 → `rpc:graph.tiering` | 画像与关系分永远是空的 |
 | `SessionSweeper` | `session.sweeper` | 周期（默认 60s） | 对「最近说过话的群」调 `rpc:session.update` | 群安静下来后没人再触发归档检查，`session.completed` 永不发布，反思链路断掉 |
 | `MaintenancePump` | `maintenance.retention` | 周期（默认 3600s，**跳过首拍**） | `rpc:chat.window.prune` + `rpc:slang.decay` + `rpc:relationship.decay` | 三个清理接口都写好了却没人调：窗口索引只增不减、黑话只读不衰、「最近」这个语义不存在 |
+| `IdleSpeakPump` | `perception.idle_speak` | 周期（默认 60s，**跳过首拍**） | 挑出「窗口里还有近期消息、但已静默 ≥ `idle_seconds`」的群，对它们调 `rpc:interrupt.score(decide=True)` | 插话评分只有 `behavior.changed` 一条入边，而分类器带滞回 —— 一场连贯群聊里行为从头不变，于是**每个群一辈子只被打一次分**，一场对话只说一句 |
 
 两个关键实现细节：
 
@@ -80,6 +81,10 @@ infra → memory → perception → session → social → reflection → expres
   而网关的 composer 两条边都接着 —— 同时生效就会**一条回复发两次**。
   `IntegrationOptions.flow_send_via_topic=True`（默认）让驱动器用 `rpc:flow.end(..., send=False)`，
   只保留主题这一跳。
+* **`IdleSpeakPump` 只敲门、不判定**。它只负责挑群并调一次 `rpc:interrupt.score`；
+  该不该说、说什么，仍由 `rpc:interrupt.score` → `rpc:interrupt.decide` 全权决定
+  （含 60s 冷却与每小时上限）。静默时长有**上下界**：太短（还在热聊）不碰，
+  太长（超过 `idle_max_seconds`，群早散了）也不碰 —— 否则重启后会对着几小时前的旧话题诈尸。
 
 ## 4. 端到端链路与归属
 
@@ -163,7 +168,7 @@ connect = true
 
 ```python
 app.contract_check()      # 与 api-index 逐字比对：missing / unknown / by_scope
-await app.health()        # 各域健康 + 五个泵状态（会 await 协程型 health）
+await app.health()        # 各域健康 + 六个泵状态（会 await 协程型 health）
 app.status()              # 同步轻量状态
 await app.drain_once()    # 手工排空一次感知缓冲
 await app.end_session(group_id, reason="manual")   # 显式收尾 → 归档 → 反思
@@ -232,14 +237,14 @@ NEW   task=grouppig.gateway.router.demux.pump → perception.ingest → rpc:chat
 uv run python -m pytest tests/test_integration_e2e.py -q -o addopts=""
 ```
 
-覆盖：单进程入口与契约自检、八个域与五个泵装配、入站消息贯通（网关/感知/记忆/会话）、
+覆盖：单进程入口与契约自检、八个域与六个泵装配、入站消息贯通（网关/感知/记忆/会话）、
 话题与会话按真实群号归属、画像与关系分、决策→生成→节流发送（并验证只发一次）、
 节流器真的会推迟第二次发送、会话结束触发反思、收尾泵、周期泵首拍开关（两个方向）、
 优雅关闭、幂等启动。
 
 ### 8.1 这些用例为什么是确定性的
 
-生产装配里同时有**五个后台任务**会碰数据库（入站投递泵、排空泵、画像泵、巡检泵，
+生产装配里同时有**六个后台任务**会碰数据库（入站投递泵、排空泵、画像泵、巡检泵，
 以及事件驱动的心流驱动器），测试任务自己也在读写库。用例不靠「把 interval 调大」
 求安静（挡不住首拍），而是显式掐掉并发源：
 

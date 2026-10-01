@@ -28,6 +28,17 @@ EXAMPLE_CONFIG_FILE = Path("config") / "grouppig.example.toml"
 DEFAULT_CREDENTIALS_FILE = Path.home() / ".dsh" / ".credentials.yaml"
 
 
+def _package_search_roots() -> tuple[Path, ...]:
+    """从本模块自身位置向上找「可能是仓库根」的目录。
+
+    默认配置路径以前是裸的 cwd 相对路径：换个工作目录启动就报「配置文件不存在」，
+    而包明明还装在同一棵树里。这里给出候选根，让默认路径可解析。
+    """
+
+    here = Path(__file__).resolve()
+    return (here.parent, *here.parents)
+
+
 def _deep_merge(base: dict[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
     out = dict(base)
     for key, value in overlay.items():
@@ -148,7 +159,12 @@ class Config:
 
 
 def resolve_config_path(path: str | os.PathLike[str] | None = None, *, root: Path | None = None) -> Path:
-    """解析配置路径：显式参数 → ``$GROUPPIG_CONFIG`` → ``config/grouppig.toml`` → ``config/grouppig.example.toml``。"""
+    """解析配置路径：显式参数 → ``$GROUPPIG_CONFIG`` → ``config/grouppig.toml`` → ``config/grouppig.example.toml``。
+
+    「默认」不是裸的 cwd 相对路径：cwd 找不到时，会顺着包自身的位置向上找同一个
+    ``config/grouppig.toml``（换目录启动、或从别处调库都能用）。显式给了 ``root``
+    就以 ``root`` 为准，不做这层回落 —— 调用方明确指定的根不该被悄悄绕过。
+    """
 
     base = root or Path.cwd()
     if path is not None:
@@ -158,7 +174,11 @@ def resolve_config_path(path: str | os.PathLike[str] | None = None, *, root: Pat
     if env_path:
         candidate = Path(env_path).expanduser()
         return candidate if candidate.is_absolute() else (base / candidate)
-    for candidate in (base / DEFAULT_CONFIG_FILE, base / EXAMPLE_CONFIG_FILE):
+    candidates = [base / DEFAULT_CONFIG_FILE, base / EXAMPLE_CONFIG_FILE]
+    if root is None:
+        for parent in _package_search_roots():
+            candidates.append(parent / DEFAULT_CONFIG_FILE)
+    for candidate in candidates:
         if candidate.is_file():
             return candidate
     return base / DEFAULT_CONFIG_FILE

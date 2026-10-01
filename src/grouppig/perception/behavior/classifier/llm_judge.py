@@ -6,6 +6,8 @@
 模型返回的 ``label`` 会做一次模糊归一（含「刷屏 / flood / 阐述 / 冷场」等中文或英文别名），
 置信度取模型 ``scores`` 里的对应分数，缺失时回落到 ``perception.classify.llm_confidence``。
 **模型不可用时不抛错**：返回 ``source="unavailable"`` 与 ``ok=False``，让聚合器继续用规则结论。
+同理，**没有可判别的输入**（既没有消息行、也没有显式 ``text``）时返回 ``source="empty_window"``
+与 ``ok=False``：空转写的模型答案只是噪声，绝不能被当成硬标签。
 
 设计：``grouppig.perception.behavior.classifier.llm-judge``（叶子模块）。
 """
@@ -140,6 +142,25 @@ class LLMJudge:
             rows = [dict(row) for row in (window.get("messages") or ())]
         if not rows and isinstance(window, Sequence):
             rows = [dict(row) for row in window]
+        # 空转写绝不能产出硬标签：模型对「一条消息都没有」的回答只是噪声，而聚合器把
+        # BEHAVIORS 里的任何标签都当成已定论（``resolved=True``），足以顶掉未定论的在任行为
+        # 并级联到插话闸门。旧实现把 RollingWindow 之类的窗口对象当行序列，抽不出行却照样
+        # 把模型答案当真 —— 这里显式降级，把「没有可判别的输入」告诉调用方。
+        if not rows and not text:
+            return {
+                "ok": False,
+                "available": False,
+                "source": "empty_window",
+                "label": "",
+                "raw_label": "",
+                "confidence": 0.0,
+                "scores": {},
+                "labels": list(labels or BEHAVIORS),
+                "message_count": 0,
+                "error": "empty_window",
+                "downstream": calls_module.outcomes([]),
+                "at": stamp,
+            }
         payload_text = text or self.prompt_of(rows)
         label_set = tuple(labels or BEHAVIORS)
         self.calls += 1

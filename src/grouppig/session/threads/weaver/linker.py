@@ -144,7 +144,18 @@ class ThreadLinker:
             saved = await self._save_thread(thread, edges=edges)
         if self.update_session and self.sessions is not None and resolved_session:
             try:
-                await self.sessions.update(resolved_session, thread_ids=[resolved_thread_id], now=stamp, advance=False)
+                # check_archive=False：这里只是把 thread_id 记回会话，属于**记账**，
+                # 不该顺带触发归档。以前它默认 True，于是 weave 可能在主流程
+                # （session/runtime/di.py 的 states.update）之前就把会话归档掉，
+                # 主流程随即撞上 InvalidTransition 并被静默吞掉 —— 那条真实消息
+                # 于是既不在任何会话里，也不在任何档案里，直接消失。
+                await self.sessions.update(
+                    resolved_session,
+                    thread_ids=[resolved_thread_id],
+                    now=stamp,
+                    advance=False,
+                    check_archive=False,
+                )
             except Exception:  # noqa: BLE001 - 会话已归档等情况不应阻断编织
                 pass
         return {

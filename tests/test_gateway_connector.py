@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -12,6 +13,7 @@ from grouppig.gateway.adapter.connector import (
     ConnectorClosed,
     ConnectorConfig,
     ConnectorError,
+    FrameRejected,
     _default_connect,
 )
 from grouppig.infra.runtime.registry import Registry
@@ -265,4 +267,195 @@ async def test_rpc_connect_and_heartbeat_handlers():
         assert pong["ok"] is True
     finally:
         await connector.close()
+        await server.stop()
+
+
+# ---- v0.2 加固：半开连接 / 坏帧 / 关停账目 --------------------------------
+async def test_half_open_connection_is_detected_and_reconnected():
+    """半开连接：读循环不报错、state 停在 open，靠连续心跳失败判定已死。
+
+    以前心跳失败只加计数、无人消费，NAT 掉线后机器人静默失聪直到重启。
+    """
+
+    server = MockOneBotServer(silent_actions={"get_status"})
+    url = await server.start()
+    connector = Connector(make_config(url, connect_timeout=0.02, heartbeat_interval=0.01, heartbeat_failure_limit=2))
+    try:
+        await connector.connect()
+        assert connector.connected is True
+
+        # 心跳一直超时 → 达到阈值后必须强制断开并进入重连
+        assert await wait_for(lambda: connector.stats.stale_disconnects >= 1, timeout=3.0)
+        assert connector.stats.heartbeat_failures >= 2
+    finally:
+        await connector.close()
+        await server.stop()
+
+
+async def test_heartbeat_success_resets_the_failure_counter():
+    """回归护栏：健康连接不能被误判为半开。"""
+
+    server = MockOneBotServer()
+    url = await server.start()
+    connector = Connector(make_config(url, connect_timeout=1.0, heartbeat_interval=0.01, heartbeat_failure_limit=2))
+    try:
+        await connector.connect()
+        assert await wait_for(lambda: connector.stats.heartbeats >= 3, timeout=3.0)
+        assert connector.stats.stale_disconnects == 0
+        assert connector.connected is True
+    finally:
+        await connector.close()
+        await server.stop()
+
+
+async def test_oversized_frame_is_rejected_without_reconnecting():
+    """坏帧不是传输故障：拒绝该帧，不缓冲、不重连。
+
+    以前任何发送异常都会缓冲该帧并触发重连，于是一个超长帧会在每次重连时
+    被重发、再次弄死新连接，形成自伤式重连循环。
+    """
+
+    server = MockOneBotServer()
+    url = await server.start()
+    connector = Connector(make_config(url, max_size=128))
+    try:
+        await connector.connect()
+        connects_before = connector.stats.connects
+
+        with pytest.raises(FrameRejected):
+            await connector.send({"action": "noop", "params": {"blob": "x" * 4096}})
+
+        assert connector.stats.rejected == 0  # send() 直接抛，不缓冲 → 不进 rejected 计数
+        assert connector.outbox_depth == 0
+        assert connector.connected is True
+        assert connector.stats.connects == connects_before
+        assert connector.state == "open"
+    finally:
+        await connector.close()
+        await server.stop()
+
+
+async def test_unencodable_frame_is_rejected_without_reconnecting():
+    """孤立代理项（lone surrogate）无法编码成 UTF-8，同属坏帧。"""
+
+    server = MockOneBotServer()
+    url = await server.start()
+    connector = Connector(make_config(url))
+    try:
+        await connector.connect()
+        with pytest.raises(FrameRejected):
+            await connector.send({"action": "noop", "params": {"text": "\ud800"}})
+        assert connector.connected is True
+        assert connector.outbox_depth == 0
+    finally:
+        await connector.close()
+        await server.stop()
+
+
+async def test_bad_frame_is_rejected_even_while_offline():
+    """坏帧离线时也要立即被拒：不要把一个注定发不出去的帧塞进 outbox。
+
+    以前 send() 先缓冲再编码，坏帧会一直躺在 outbox 里，直到某次冲刷才炸，
+    而且炸的方式是「重连」——把刚建好的健康连接也一起弄死。
+    """
+
+    async def never_connect(target: str, **kwargs):
+        raise OSError("no server")
+
+    connector = Connector(make_config("ws://127.0.0.1:1", max_size=128), connect_fn=never_connect)
+    try:
+        with pytest.raises(FrameRejected):
+            await connector.send({"action": "noop", "params": {"blob": "x" * 4096}})
+        # 好帧照常进缓冲，坏帧一点痕迹都不留
+        assert await connector.send({"action": "noop", "params": {"i": 1}}) is False
+        assert connector.outbox_depth == 1
+        assert connector.stats.buffered == 1
+        assert connector.stats.rejected == 0
+    finally:
+        await connector.close()
+
+
+async def test_close_accounts_for_frames_left_in_outbox():
+    """关停时 outbox 里的残留帧必须计数 + 打日志，不能静默消失。"""
+
+    async def never_connect(target: str, **kwargs):
+        raise OSError("no server")
+
+    connector = Connector(make_config("ws://127.0.0.1:1"), connect_fn=never_connect)
+    for index in range(3):
+        await connector.send({"action": "noop", "params": {"i": index}})
+    assert connector.outbox_depth == 3
+
+    await connector.close()
+    assert connector.stats.discarded_on_close == 3
+    assert connector.stats.dropped == 3
+    assert connector.outbox_depth == 0
+
+
+async def test_stale_disconnect_does_not_clobber_a_newer_connection():
+    """陈旧的读循环退出不得清掉之后才建好的新连接。"""
+
+    server = MockOneBotServer()
+    url = await server.start()
+    connector = Connector(make_config(url))
+    try:
+        await connector.connect()
+        healthy = connector._ws
+        assert healthy is not None
+
+        # 模拟一个「陈旧的 ws」触发断线：当前连接必须不受影响
+        connector._handle_disconnect("stale_reader", ws=object())
+
+        assert connector.connected is True
+        assert connector._ws is healthy
+        assert connector.state == "open"
+    finally:
+        await connector.close()
+        await server.stop()
+
+
+def test_unmatched_response_is_not_dispatched_as_an_event():
+    """已超时请求的迟到响应是响应，不是事件：不得派发、不得抬高 events_received。
+
+    以前 unmatched 分支会继续往下走，把这个响应当成 ``unknown.empty`` 事件派发出去。
+    """
+
+    connector = Connector(make_config("ws://127.0.0.1:1"))
+    events: list[dict] = []
+    connector.on_event = events.append
+
+    # 一个带 echo、但没有任何在途请求与之匹配的帧 = 已超时请求的迟到响应
+    connector._on_raw(json.dumps({"status": "ok", "retcode": 0, "echo": "grouppig-999", "data": {}}))
+
+    assert connector.stats.unmatched_responses == 1
+    assert connector.stats.responses_received == 0
+    assert connector.stats.events_received == 0
+    assert events == []
+
+
+async def test_repeated_heartbeat_reconnects_do_not_leak_sockets_or_readers():
+    """反复「心跳判定已死 → 重连」之后，socket 与读循环都必须被回收。
+
+    这是 close() 挂死的根因：``_handle_disconnect`` 只把 ``self._ws`` 置空却不关
+    socket，更早的连接失去引用后既没人关、它的读循环也永远挂在 ``async for`` 上。
+    """
+
+    server = MockOneBotServer(silent_actions={"get_status"})
+    url = await server.start()
+    connector = Connector(make_config(url, connect_timeout=0.02, heartbeat_interval=0.01, heartbeat_failure_limit=2))
+    try:
+        await connector.connect()
+        # 让它自己反复「判定半开 → 重连」若干轮
+        assert await wait_for(lambda: connector.stats.stale_disconnects >= 2, timeout=5.0)
+        assert await wait_for(
+            lambda: connector.status()["live_sockets"] <= 1 and connector.status()["live_readers"] <= 1,
+            timeout=3.0,
+        )
+        # 关停必须能返回（旧实现在这里永久挂住）
+        await asyncio.wait_for(connector.close(), timeout=10.0)
+        assert connector.status()["live_sockets"] == 0
+        assert connector.status()["live_readers"] == 0
+    finally:
+        if not connector._closing:
+            await connector.close()
         await server.stop()

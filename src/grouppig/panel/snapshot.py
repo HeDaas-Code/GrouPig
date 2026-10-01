@@ -83,15 +83,55 @@ class EventRing:
 #: 进程级事件缓冲（Web / TUI 共用）。
 EVENTS = EventRing()
 
+#: 事件负载里装**用户原话 / 模型原文**的键。
+#:
+#: 面板是运维观测面，不是聊天记录阅读器：总线把每条发布的事件都塞进环形缓冲，
+#: 而聊天事件的 payload 里就带着群消息正文。默认把这类键脱敏，避免「打开面板
+#: 就等于把群聊内容回显到浏览器」—— 尤其在没有鉴权、或绑到非本机地址的时候。
+FREE_TEXT_KEYS = frozenset(
+    {
+        "text",
+        "content",
+        "message",
+        "msg",
+        "raw",
+        "raw_message",
+        "body",
+        "reply",
+        "prompt",
+        "answer",
+        "completion",
+    }
+)
+
+#: 超过这个长度的自由文本才脱敏。
+#:
+#: 保留短串是为了不把观测面变成盲盒：`text=hi` 这类短标记（测试、心跳、状态词）
+#: 仍然可读，而真正的群消息正文一律只给长度。
+FREE_TEXT_KEEP = 12
+
+
+def _redact(value: str) -> str:
+    """自由文本的默认呈现：只给长度，不给内容。"""
+
+    if len(value) <= FREE_TEXT_KEEP:
+        return value
+    return f"<已脱敏 {len(value)} 字>"
+
 
 def _summarize(payload: Any, *, width: int = 120) -> str:
-    """把事件负载压成一行摘要。"""
+    """把事件负载压成一行摘要（自由文本按键脱敏）。"""
 
     if payload is None:
         return ""
     if isinstance(payload, dict):
-        parts = [f"{k}={_short(v)}" for k, v in list(payload.items())[:6]]
+        parts = []
+        for key, value in list(payload.items())[:6]:
+            shown = _redact(value) if key in FREE_TEXT_KEYS and isinstance(value, str) else _short(value)
+            parts.append(f"{key}={shown}")
         text = " ".join(parts)
+    elif isinstance(payload, str):
+        text = _redact(payload)
     else:
         text = _short(payload)
     return text[:width]
@@ -233,6 +273,8 @@ def build_snapshot(app: Any = None, options: SnapshotOptions | None = None) -> d
 __all__ = [
     "EVENTS",
     "EVENT_BUFFER_SIZE",
+    "FREE_TEXT_KEEP",
+    "FREE_TEXT_KEYS",
     "SNAPSHOT_VERSION",
     "EventRing",
     "SnapshotOptions",

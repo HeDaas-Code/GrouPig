@@ -42,7 +42,7 @@ from grouppig.session.lifecycle.event_emitter import SessionEventEmitter
 from grouppig.session.lifecycle.heat import HeatManager
 from grouppig.session.lifecycle.state_machine import SessionStateMachine
 from grouppig.session.runtime import messages as messages_module
-from grouppig.session.runtime.errors import SessionError
+from grouppig.session.runtime.errors import InvalidTransition, SessionError, SessionNotFound
 from grouppig.session.threads.cross import matcher as matcher_module
 from grouppig.session.threads.cross import reference_parser as reference_parser_module
 from grouppig.session.threads.cross.matcher import CrossSessionMatcher
@@ -165,6 +165,14 @@ class SessionLayer:
         self._wire()
         self.subscription: Any = None
         self.ingested: list[dict[str, Any]] = []
+        #: 因会话已归档而不得不补开会话、把消息接住的次数（>0 说明发生过本会丢消息的竞态）
+        self.recovered = 0
+
+    @property
+    def logger(self) -> Any:
+        """容器日志器（可能尚未挂载）。"""
+
+        return getattr(self.container, "logger", None)
 
     # ---- 接线 ----------------------------------------------------------
     def _wire(self) -> None:
@@ -278,6 +286,28 @@ class SessionLayer:
         window.append(dict(message))
         return list(window)
 
+    async def _recover_message(self, group_id: int, message: dict[str, Any], *, now: float | None) -> dict[str, Any]:
+        """会话已归档导致更新失败时，补开一个会话把这条消息接住。
+
+        保证不变量：**每条被接受的消息都恰好落进一个会话**。
+        宁可多开一场会话，也不能让真实消息从反思链路里凭空消失。
+        """
+
+        try:
+            opened = await self.states.open(group_id=group_id, messages=[message], now=now)
+            session_id = str((opened.get("session") or {}).get("session_id", "") or "")
+            if not session_id:
+                return opened
+            return await self.states.update(session_id, group_id=group_id, messages=[message], now=now)
+        except Exception as exc:  # noqa: BLE001 - 兜底失败必须留痕，不能再静默
+            if self.logger is not None:
+                self.logger.error(
+                    "session.recover_failed",
+                    group_id=group_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            return {"recovered": False, "error": f"{type(exc).__name__}: {exc}"}
+
     async def on_message(self, event: Any) -> dict[str, Any]:
         """群消息到达后的会话层主管线（订阅 ``kafka:grouppig.qq.message.received``）。
 
@@ -295,13 +325,32 @@ class SessionLayer:
         updated: dict[str, Any] | None = None
         with contextlib.suppress(Exception):
             woven = await self.linker.weave(group_id, [message], now=now)
-        with contextlib.suppress(Exception):
+        # 这里**不能**用 contextlib.suppress 一把吞掉。
+        #
+        # 以前正是这样：weave 内部那次记账更新会顺手把会话归档（已单独修掉），
+        # 主更新随即撞上 InvalidTransition 被静默吞掉，那条真实消息于是
+        # 既不在任何会话里、也不在任何档案里 —— 直接从反思链路里消失，
+        # 而调用方看到的仍是一次成功处理。
+        #
+        # 现在：只接住「会话已不在可更新状态」这一类预期异常，并**补开一个会话**
+        # 把消息接住，保证「每条被接受的消息都恰好落进一个会话」这个不变量。
+        try:
             updated = await self.states.update(
                 (detected.get("session") or {}).get("session_id"),
                 group_id=group_id,
                 messages=[message],
                 now=now,
             )
+        except (InvalidTransition, SessionNotFound) as exc:
+            self.recovered += 1
+            if self.logger is not None:
+                self.logger.warning(
+                    "session.update_recovered",
+                    group_id=group_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                    recovered=self.recovered,
+                )
+            updated = await self._recover_message(group_id, message, now=now)
         record = {
             "group_id": group_id,
             "topic_id": detected.get("topic_id", ""),
@@ -360,6 +409,7 @@ class SessionLayer:
             "wake": self.restorer.stats(),
             "emitter": self.emitter.stats(),
             "ingested": len(self.ingested),
+            "recovered": self.recovered,
             "window": {"messages": self.window_messages, "seconds": self.window_seconds, "groups": len(self.windows)},
             "subscribed": self.subscription is not None,
         }

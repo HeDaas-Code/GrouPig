@@ -47,6 +47,16 @@ class ConnectorClosed(ConnectorError):
     """连接管理器已关闭，不再接受收发。"""
 
 
+class FrameRejected(ConnectorError):
+    """单帧被拒（过大 / 无法编码），**不是**传输故障。
+
+    以前 ``send()`` 把任何异常都当成传输故障：缓冲该帧 + 触发重连。
+    于是一个孤立代理项或超长帧会在每次重连时被重发、再次弄死新连接，
+    形成自伤式重连循环。这类错误是**帧本身**的问题，与连接无关：
+    计数、丢弃、不重连。
+    """
+
+
 Frame = dict[str, Any]
 EventHandler = Callable[[Frame], Awaitable[None] | None]
 ConnectFn = Callable[..., Awaitable[Any]]
@@ -64,7 +74,15 @@ class ConnectorConfig:
     connect_timeout: float = 10.0
     max_backoff: float = 60.0
     outbox_limit: int = 500
-    ping_interval: float | None = None
+    #: WebSocket 层保活间隔。此前默认 ``None`` = **关闭保活**，于是 NAT / 空闲掉线后
+    #: 读循环永远不报错，``state`` 停在 ``"open"``，机器人静默失聪直到重启。
+    #: 20s 与 websockets 库自身的默认值一致。
+    ping_interval: float | None = 20.0
+    #: 连续多少次应用层心跳失败就判定连接已死并强制重连。
+    #: 半开连接靠这个兜底：心跳（``get_status``）超时是唯一可靠的存活信号。
+    heartbeat_failure_limit: int = 3
+    #: 关闭单个 socket / 等待读循环退出的上限（关停不能无限期挂住）
+    close_timeout: float = 5.0
     max_size: int = 8 * 1024 * 1024
 
     @classmethod
@@ -82,6 +100,7 @@ class ConnectorConfig:
                 return default
 
         ping = config.get("onebot.ping_interval", None)
+        failure_limit = config.get("onebot.heartbeat_failure_limit", 3)
         return cls(
             ws_url=str(config.get("onebot.ws_url", cls.ws_url) or cls.ws_url),
             access_token=str(config.get("onebot.access_token", "") or ""),
@@ -92,6 +111,7 @@ class ConnectorConfig:
             max_backoff=num("onebot.max_backoff", 60.0),
             outbox_limit=int(config.get("onebot.outbox_limit", 500) or 500),
             ping_interval=None if ping in (None, "") else float(ping),
+            heartbeat_failure_limit=int(failure_limit or 3),
         )
 
     def headers(self) -> dict[str, str]:
@@ -123,6 +143,12 @@ class ConnectorStats:
     buffered: int = 0
     flushed: int = 0
     dropped: int = 0
+    #: 单帧被拒（过大 / 无法编码）：与传输故障分开计数，不触发重连
+    rejected: int = 0
+    #: 关闭时仍在 outbox 里、来不及发出的帧（此前静默丢弃，无计数无日志）
+    discarded_on_close: int = 0
+    #: 因连续心跳失败判定连接已死而强制重连的次数（半开连接兜底）
+    stale_disconnects: int = 0
     heartbeats: int = 0
     heartbeat_failures: int = 0
     errors: int = 0
@@ -145,6 +171,9 @@ class ConnectorStats:
             "buffered": self.buffered,
             "flushed": self.flushed,
             "dropped": self.dropped,
+            "rejected": self.rejected,
+            "discarded_on_close": self.discarded_on_close,
+            "stale_disconnects": self.stale_disconnects,
             "heartbeats": self.heartbeats,
             "heartbeat_failures": self.heartbeat_failures,
             "errors": self.errors,
@@ -187,6 +216,15 @@ class Connector:
         self._outbox: deque[Frame] = deque()
         self._lock = asyncio.Lock()
         self._last_pong: Frame | None = None
+        #: 连续心跳失败计数（成功即清零）。达到 ``heartbeat_failure_limit`` 判定连接已死。
+        self._consecutive_heartbeat_failures = 0
+        #: **全部**在途 socket 与读循环，而不只是「最新那一个」。
+        #: ``self._ws`` / ``self._reader_task`` 只记最新值；反复断开重连时更早的连接
+        #: 会失去引用 —— 既没人关闭它的 socket，它的读循环也永远不会退出。
+        #: 结果是 socket 与任务双泄漏，并且关停时 ``close()`` 永久挂住。
+        self._sockets: set[Any] = set()
+        self._readers: set[asyncio.Task] = set()
+        self._closers: set[asyncio.Task] = set()
 
     # ---- 状态 ----------------------------------------------------------
     @property
@@ -206,6 +244,9 @@ class Connector:
             "authenticated": bool(self.config.access_token),
             "outbox": len(self._outbox),
             "pending_actions": len(self._pending),
+            # 正常情况下两者都不超过 1。持续 >1 说明有连接没被回收（泄漏可见化）。
+            "live_sockets": len(self._sockets),
+            "live_readers": len(self._readers),
             "last_pong": self._last_pong,
             "stats": self.stats.as_dict(),
         }
@@ -253,6 +294,7 @@ class Connector:
             raise ConnectorError(f"连接 {self.config.ws_url} 失败：{exc}") from exc
 
         self._ws = ws
+        self._sockets.add(ws)
         self.state = "open"
         self.stats.connects += 1
         if reconnecting:
@@ -260,9 +302,34 @@ class Connector:
         self.stats.connected_at = self._clock()
         self._connected.set()
         self._log("info", "connector.connected", url=self.config.ws_url, reconnecting=reconnecting)
-        self._reader_task = asyncio.create_task(self._reader_loop(ws), name="grouppig.connector.reader")
+        reader = asyncio.create_task(self._reader_loop(ws), name="grouppig.connector.reader")
+        self._readers.add(reader)
+        reader.add_done_callback(self._readers.discard)
+        self._reader_task = reader
         self._start_heartbeat()
         await self._flush_outbox()
+
+    async def _close_socket(self, ws: Any) -> None:
+        """尽力关闭一个 socket，且**有界**——关停路径绝不能无限期挂住。"""
+
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(ws.close(), timeout=self.config.close_timeout)
+
+    def _detach_socket(self, ws: Any) -> None:
+        """把 socket 从在途集合里摘掉并安排关闭。
+
+        ``_handle_disconnect`` 是同步路径（读循环的 ``finally`` / ``send`` 失败），
+        关连接是异步的，只能派生一个收尾任务。以前这里只是把 ``self._ws`` 置空，
+        socket 再也没人关，读循环也就永远退不出。
+        """
+
+        self._sockets.discard(ws)
+        try:
+            closer = asyncio.create_task(self._close_socket(ws), name="grouppig.connector.close-ws")
+        except RuntimeError:  # pragma: no cover - 无运行中的事件循环（解释器收尾）
+            return
+        self._closers.add(closer)
+        closer.add_done_callback(self._closers.discard)
 
     async def wait_connected(self, *, timeout: float | None = None) -> bool:
         """等待连接可用（``timeout=None`` 表示一直等）。"""
@@ -276,7 +343,12 @@ class Connector:
         return self.connected
 
     async def close(self) -> None:
-        """主动关闭：停心跳 / 读循环 / 重连，不再重连。"""
+        """主动关闭：停心跳 / 读循环 / 重连，不再重连。
+
+        必须回收**全部**在途 socket 与读循环，而不只是 ``self._ws`` / ``self._reader_task``
+        记着的那两个：反复断开重连会留下更早的连接，只收最新那个会让它们的读循环
+        永远挂在 ``async for`` 上，``close()`` 于是永久不返回（进程关不掉）。
+        """
 
         self._closing = True
         self.state = "closed"
@@ -287,26 +359,71 @@ class Connector:
                     await task
         self._heartbeat_task = None
         self._reconnect_task = None
-        ws, self._ws = self._ws, None
+
         self._connected.clear()
-        if ws is not None:
-            with contextlib.suppress(Exception):
-                await ws.close()
-        reader, self._reader_task = self._reader_task, None
-        if reader is not None and not reader.done():
+        self._ws = None
+        sockets = list(self._sockets)
+        self._sockets.clear()
+        for ws in sockets:
+            await self._close_socket(ws)
+
+        readers = list(self._readers)
+        self._readers.clear()
+        self._reader_task = None
+        for task in readers:
+            if not task.done():
+                task.cancel()
+        for task in readers:
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await reader
+                await asyncio.wait_for(task, timeout=self.config.close_timeout)
+
+        # 收尾的 socket 关闭任务也要等干净，否则解释器退出时会报 "Task was destroyed"
+        closers = list(self._closers)
+        for task in closers:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(task, timeout=self.config.close_timeout)
+
         self._fail_pending(ConnectorClosed("连接已关闭"))
         self.stats.disconnected_at = self._clock()
+        # 关停时 outbox 里剩下的帧是真的发不出去了。以前既不计数也不打日志，
+        # 运维在 SIGTERM 之后无从判断「有没有丢东西、丢了多少」。
+        leftover = len(self._outbox)
+        if leftover:
+            self._outbox.clear()
+            self.stats.discarded_on_close += leftover
+            self.stats.dropped += leftover
+            self._log("warning", "connector.outbox_discarded_on_close", discarded=leftover)
         self._log("info", "connector.closed", url=self.config.ws_url)
 
     # ---- 收发 ----------------------------------------------------------
+    def _encode(self, frame: Mapping[str, Any]) -> str:
+        """把帧编码成待发送的 JSON 文本；帧本身有问题时抛 :class:`FrameRejected`。
+
+        与连接状态无关，所以必须在「缓冲 / 重连」判断**之前**做：
+        编码失败的帧重发多少次都会失败，重连只是白白弄死新连接。
+        """
+
+        try:
+            payload = json.dumps(dict(frame), ensure_ascii=False)
+            encoded = payload.encode("utf-8")
+        except (TypeError, ValueError, UnicodeEncodeError) as exc:
+            # 孤立代理项（lone surrogate）走的就是 UnicodeEncodeError
+            raise FrameRejected(f"帧无法编码为 UTF-8 JSON：{type(exc).__name__}: {exc}") from exc
+        limit = max(1, int(self.config.max_size))
+        if len(encoded) > limit:
+            raise FrameRejected(f"帧超过 max_size（{len(encoded)} > {limit} 字节）")
+        return payload
+
     async def send(self, frame: Mapping[str, Any]) -> bool:
-        """发送一帧；未连接时写入 outbox。返回是否已真正写出。"""
+        """发送一帧；未连接时写入 outbox。返回是否已真正写出。
+
+        帧本身非法（过大 / 无法编码）时抛 :class:`FrameRejected` ——
+        **不缓冲、不重连**，因为重发同一个坏帧只会再次失败。
+        """
 
         if self._closing:
             raise ConnectorClosed("连接管理器已关闭")
-        payload = json.dumps(dict(frame), ensure_ascii=False)
+        payload = self._encode(frame)
         ws = self._ws
         if ws is None or self.state != "open":
             self._buffer(dict(frame))
@@ -318,7 +435,7 @@ class Connector:
             self.stats.last_error = f"{type(exc).__name__}: {exc}"
             self._buffer(dict(frame))
             self._log("warning", "connector.send_failed", error=self.stats.last_error)
-            self._handle_disconnect("send_failed")
+            self._handle_disconnect("send_failed", ws=ws)
             return False
         self.stats.frames_sent += 1
         return True
@@ -360,9 +477,16 @@ class Connector:
             response = await self.request("get_status", {}, timeout=self.config.connect_timeout)
         except Exception as exc:
             self.stats.heartbeat_failures += 1
+            self._consecutive_heartbeat_failures += 1
             self.stats.last_error = f"{type(exc).__name__}: {exc}"
-            self._log("warning", "connector.heartbeat_failed", error=self.stats.last_error)
+            self._log(
+                "warning",
+                "connector.heartbeat_failed",
+                error=self.stats.last_error,
+                consecutive=self._consecutive_heartbeat_failures,
+            )
             return {"ok": False, "error": self.stats.last_error, "state": self.state}
+        self._consecutive_heartbeat_failures = 0
         self.stats.heartbeats += 1
         self.stats.last_heartbeat_at = self._clock()
         self._last_pong = response
@@ -388,7 +512,7 @@ class Connector:
             self._log("warning", "connector.reader_failed", error=reason)
         finally:
             if not self._closing:
-                self._handle_disconnect(reason)
+                self._handle_disconnect(reason, ws=ws)
 
     def _on_raw(self, raw: Any) -> None:
         self.stats.frames_received += 1
@@ -413,6 +537,10 @@ class Connector:
             return
         if echo is not None:
             self.stats.unmatched_responses += 1
+            # 已经超时的请求，其响应此刻才到。它是**响应**，不是事件：
+            # 以前会继续往下走，把它当成一个 ``unknown.empty`` 事件派发出去，
+            # 同时把 events_received 也抬高。
+            return
         self.stats.events_received += 1
         self._dispatch_event(dict(frame))
 
@@ -441,10 +569,24 @@ class Connector:
             self._log("error", "connector.event_handler_failed", error=self.stats.last_error)
 
     # ---- 重连 ----------------------------------------------------------
-    def _handle_disconnect(self, reason: str) -> None:
+    def _handle_disconnect(self, reason: str, *, ws: Any = None) -> None:
+        """标记断线并（必要时）拉起重连。
+
+        ``ws`` 是**触发这次断线的那个连接对象**。带了它就做身份校验：
+        陈旧的读循环退出、或一次迟到的发送失败，都不该清掉**之后**才建好的新连接——
+        否则会凭空多出一条重连循环，并把刚建好的健康连接丢在一边。
+        """
+
+        if ws is not None and self._ws is not None and ws is not self._ws:
+            self._log("debug", "connector.stale_disconnect_ignored", reason=reason)
+            return
+        detached = self._ws if ws is None else ws
         self.stats.disconnected_at = self._clock()
         self._connected.clear()
         self._ws = None
+        # 摘掉的 socket 必须真的关掉，否则它的读循环永远不结束
+        if detached is not None:
+            self._detach_socket(detached)
         if self._closing:
             return
         self.state = "reconnecting"
@@ -484,8 +626,30 @@ class Connector:
                 if self._closing or not self.connected:
                     continue
                 await self.heartbeat()
+                self._check_liveness()
         except asyncio.CancelledError:
             raise
+
+    def _check_liveness(self) -> None:
+        """心跳连续失败到阈值就判定连接已死，强制走重连。
+
+        这是**半开连接**的唯一兜底：TCP 对端消失（NAT 超时、机器休眠、网线拔掉）时
+        读循环既不报错也不结束，``state`` 会永远停在 ``"open"``，机器人静默失聪。
+        心跳（``get_status``）超时是这里唯一可靠的存活信号。
+        """
+
+        limit = max(1, int(self.config.heartbeat_failure_limit))
+        if self._consecutive_heartbeat_failures < limit:
+            return
+        self.stats.stale_disconnects += 1
+        self._log(
+            "warning",
+            "connector.stale_connection",
+            consecutive_failures=self._consecutive_heartbeat_failures,
+            limit=limit,
+        )
+        self._consecutive_heartbeat_failures = 0
+        self._handle_disconnect("heartbeat_failures", ws=self._ws)
 
     def _buffer(self, frame: Frame) -> None:
         limit = max(1, int(self.config.outbox_limit))
@@ -500,13 +664,21 @@ class Connector:
         while self._outbox and self.connected:
             frame = self._outbox.popleft()
             try:
-                await self._ws.send(json.dumps(frame, ensure_ascii=False))
+                payload = self._encode(frame)
+            except FrameRejected as exc:
+                # 坏帧不该拖垮连接：计数、丢弃、继续发下一帧（以前会重连，形成自伤循环）
+                self.stats.rejected += 1
+                self.stats.last_error = str(exc)
+                self._log("warning", "connector.frame_rejected", error=self.stats.last_error, dropped=True)
+                continue
+            try:
+                await self._ws.send(payload)
             except Exception as exc:
                 self._buffer(frame)
                 self.stats.errors += 1
                 self.stats.last_error = f"{type(exc).__name__}: {exc}"
                 self._log("warning", "connector.flush_failed", error=self.stats.last_error)
-                self._handle_disconnect("flush_failed")
+                self._handle_disconnect("flush_failed", ws=self._ws)
                 break
             self.stats.frames_sent += 1
             self.stats.flushed += 1
@@ -552,6 +724,7 @@ __all__ = [
     "ConnectorConfig",
     "ConnectorError",
     "ConnectorStats",
+    "FrameRejected",
     "make_handlers",
     "register",
 ]

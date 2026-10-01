@@ -20,12 +20,25 @@ dev = [
     "ruff>=0.6",
 ]
 
+[project.scripts]
+# 与 `python -m grouppig.runtime` 是同一个入口（runtime/app.py:main）。
+grouppig = "grouppig.runtime.app:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/grouppig"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# 装到 site-packages 之后仓库走查必然失败，所以把设计树也随包带上一份。
+# 仓库里那份**原地不动**：contract.api_index_path() 永远优先返回它，
+# 计数类测试（test_contract_alignment / test_skeleton）看到的还是同一棵树。
+#
+# 注意：api-index.json 不在这里列 —— `src/grouppig/_data/api-index.json` 已经是一份
+# 物理副本，packages 会自动带上；再 force-include 一次 hatchling 会因「同一路径写两次」直接构建失败。
+"normify-grouppig/modules" = "grouppig/_data/modules"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

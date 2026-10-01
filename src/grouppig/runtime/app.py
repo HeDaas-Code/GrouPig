@@ -33,6 +33,7 @@ import argparse
 import asyncio
 import contextlib
 import signal
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -41,10 +42,11 @@ from typing import Any
 
 from grouppig.infra.runtime import contract as contract_module
 from grouppig.infra.runtime.di import Container, build_container
+from grouppig.infra.runtime.errors import GrouPigError
 from grouppig.runtime.errors import IntegrationError
 from grouppig.runtime.pumps import DrainPump, FlowDriver, ProfilePump, SessionSweeper
 
-#: 默认配置文件（与 `grouppig.infra.runtime.di` 的默认路径一致）。
+#: 默认配置文件（相对路径；解析时先看 cwd，再顺着包的位置回到仓库根）。
 DEFAULT_CONFIG_PATH = "config/grouppig.toml"
 
 #: 装配顺序（设计依赖方向：下游在前）。
@@ -379,16 +381,27 @@ class GrouppigApp:
     async def aclose(self) -> None:
         """停泵 → 断接入 → 关容器。"""
 
-        if not self._started:
+        # 装配**中途**失败时 `_started` 仍是 False，但容器已经 start 过：路由器、
+        # 事件总线、日志句柄都还活着。只看 `_started` 会连清理一起跳过，留下没关的
+        # 句柄 —— `--check` 曾经就是这样「报错退出且没有 app.closed」。
+        if not self._started and not self.container.started:
             return
+        started = self._started
         await self.stop_pumps()
         if self.gateway is not None:
             with contextlib.suppress(Exception):
                 await self.gateway.aclose()
+        # memory 的引擎是 app 自己 attach 的（`start()` 里那次），所以也由 app 释放：
+        # 只关容器会把 aiosqlite 的工作线程留在后台，事件循环一关就炸出
+        # 「Event loop is closed」。
+        if self.memory is not None:
+            with contextlib.suppress(Exception):
+                await self.memory.aclose()
         with contextlib.suppress(Exception):
             await self.container.aclose()
         self._started = False
-        self._log("info", "app.closed", uptime=round(time.time() - self.started_at, 3))
+        if started:  # 没跑起来就无所谓 uptime，别打一条误导性的收尾日志
+            self._log("info", "app.closed", uptime=round(time.time() - self.started_at, 3))
 
     async def __aenter__(self) -> GrouppigApp:
         return await self.start()
@@ -620,39 +633,86 @@ async def run(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="grouppig", description="GrouPig 单进程闭环（OneBot → 感知 → 表达 → 反思）")
-    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="配置文件路径")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="配置文件路径（默认 config/grouppig.toml：先看 cwd，再顺着包的位置回到仓库根）",
+    )
     parser.add_argument("--dsn", default=None, help="覆盖 storage.dsn（如 sqlite+aiosqlite:///:memory:）")
-    parser.add_argument("--check", action="store_true", help="只装配并打印契约自检结果，然后退出")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="只装配并打印契约自检结果，然后退出（隐含 --no-connect / --no-pumps，且不跑迁移）",
+    )
     parser.add_argument("--no-connect", action="store_true", help="不连 OneBot（只跑装配与契约自检）")
     parser.add_argument("--no-pumps", action="store_true", help="不启动周期泵（手工驱动 / 排障）")
     parser.add_argument("--duration", type=float, default=None, help="跑 N 秒后自动退出（默认常驻）")
     parser.add_argument("--panel", action="store_true", help="同时启动只读管理面板（默认 127.0.0.1:8848）")
     parser.add_argument("--panel-host", default="127.0.0.1", help="面板监听地址（默认仅本机）")
     parser.add_argument("--panel-port", type=int, default=8848, help="面板监听端口")
+    parser.add_argument(
+        "--panel-allow-remote",
+        action="store_true",
+        help="显式允许面板绑定非本机地址（会打印醒目警告；请自行加反向代理与鉴权）",
+    )
+    parser.add_argument(
+        "--panel-token",
+        default=None,
+        help="面板共享密钥（缺省读 [panel].token）；设了之后请求要带 ?token= 或 X-Panel-Token",
+    )
     parser.add_argument("--quiet", action="store_true", help="不打印启动摘要")
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """命令行入口：`python -m grouppig.runtime`。"""
+def _fail(message: str) -> int:
+    """打印一行可操作的错误到 stderr 并返回非零退出码。
+
+    CLI 的失败不该是裸 traceback：运维要的是「哪一步错了 + 怎么办」。
+    """
+
+    print(f"grouppig: {message}", file=sys.stderr)
+    return 1
+
+
+def main(argv: Sequence[str] | None = None, *, registry: Any = None) -> int:
+    """命令行入口：`python -m grouppig.runtime`。
+
+    ``registry`` 仅供进程内测试注入独立注册表用：默认走全局 ``default_registry``，
+    而 CLI 装配会把整棵树的名字注册进去 —— 进程内调用会污染同一进程里其他测试
+    对全局注册表的隔离断言。
+    """
 
     args = _parser().parse_args(list(argv) if argv is not None else None)
     try:
-        return asyncio.run(_main_async(args))
+        return asyncio.run(_main_async(args, registry=registry))
     except KeyboardInterrupt:  # pragma: no cover - 交互式中断
         return 130
 
 
-async def _main_async(args: argparse.Namespace) -> int:
+async def _main_async(args: argparse.Namespace, *, registry: Any = None) -> int:
     config_path = Path(args.config) if args.config else None
     if config_path is not None and not config_path.is_file():
-        raise IntegrationError(f"配置文件不存在：{config_path}")
-    app = await create_app(
+        return _fail(f"配置文件不存在：{config_path}")
+    # `--check` 的 help 承诺是「只装配 + 打印自检后退出」。连 OneBot、跑迁移、
+    # 起周期泵都是有副作用的动作，会让「检查」变成「启动」——所以这里显式全关：
+    # 检查不该去连一个可能不存在的 NapCat，也不该在运维的真实库里建表。
+    connect = False if args.check else not args.no_connect
+    pumps = False if args.check else not args.no_pumps
+    migrate = False if args.check else None  # None → 沿用配置里的 app.integration.migrate
+    app = build_app(
         config_path=config_path,
         dsn=args.dsn,
-        connect=not args.no_connect,
-        pumps=not args.no_pumps,
+        connect=connect,
+        pumps=pumps,
+        migrate=migrate,
+        registry=registry,
     )
+    try:
+        await app.start()
+    except (GrouPigError, OSError, ValueError) as error:
+        # 启动失败也要走收尾：容器可能已经起来一半（见 GrouppigApp.aclose）。
+        await app.aclose()
+        return _fail(f"启动失败：{type(error).__name__}: {error}（检查 --config / --dsn 与 OneBot 地址）")
     report = app.contract_check()
     if not args.quiet:
         summary = contract_module.summary()
@@ -665,9 +725,20 @@ async def _main_async(args: argparse.Namespace) -> int:
         return 0 if not report["missing"] else 1
     panel = None
     if args.panel:
-        panel = _start_panel(app, args.panel_host, args.panel_port)
+        try:
+            panel = _start_panel(
+                app,
+                args.panel_host,
+                args.panel_port,
+                token=args.panel_token,
+                allow_remote=args.panel_allow_remote,
+            )
+        except Exception as error:  # noqa: BLE001 - 面板起不来不该留下半个运行时
+            await app.aclose()
+            return _fail(f"面板启动失败：{type(error).__name__}: {error}")
         if not args.quiet:
-            print(f"管理面板：http://{panel.server_address[0]}:{panel.server_address[1]}/（只读）")
+            suffix = "，需要 ?token=…" if args.panel_token else ""
+            print(f"管理面板：http://{panel.server_address[0]}:{panel.server_address[1]}/（只读{suffix}）")
     try:
         if args.duration is None:
             stop = asyncio.Event()
@@ -686,14 +757,27 @@ async def _main_async(args: argparse.Namespace) -> int:
     return 0
 
 
-def _start_panel(app: Any, host: str, port: int) -> Any:
-    """在后台线程启动只读面板，返回 httpd（调用方负责 shutdown）。"""
+def _start_panel(
+    app: Any,
+    host: str,
+    port: int,
+    *,
+    token: str | None = None,
+    allow_remote: bool = False,
+) -> Any:
+    """在后台线程启动只读面板，返回 httpd（调用方负责 shutdown）。
+
+    ``token`` 缺省时读 ``[panel].token``；绑非本机地址而没有 ``allow_remote``
+    会抛 ``PanelBindError``（由调用方转成一行可操作的错误）。
+    """
 
     import threading
 
     from grouppig.panel import web
 
-    httpd = web.serve(app, host=host, port=port)
+    config = getattr(getattr(app, "container", None), "config", None)
+    settings = web.PanelSettings.from_config(config, host=host, token=token, allow_remote=allow_remote)
+    httpd = web.serve(app, host=host, port=port, settings=settings)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd
 

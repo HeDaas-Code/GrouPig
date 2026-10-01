@@ -36,6 +36,16 @@ _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 #: 删掉 state 行，全树 0 个模块写 state: active。
 DEFAULT_STATE = "active"
 
+#: 随包分发的 ``api-index.json`` 副本（``src/grouppig/_data/api-index.json``）。
+#:
+#: 仓库里跑时**永远优先用仓库那份**（``normify-grouppig/api-index.json``）——设计树是
+#: 唯一事实来源，而 ``test_contract_alignment`` / ``test_skeleton`` 的计数都从它推导。
+#: 只有当包离开源码树（pip 装进 site-packages、或只把 ``src/grouppig`` 拷走）导致仓库
+#: 走查失败时，才回落到这份副本：否则 ``di.py`` 在 import 期的
+#: ``assert_known_name`` 会直接把 ``import grouppig`` 打死。
+_BUNDLED_DATA = Path(__file__).resolve().parents[2] / "_data"
+_BUNDLED_API_INDEX = _BUNDLED_DATA / "api-index.json"
+
 
 @dataclass(frozen=True)
 class ModuleSpec:
@@ -82,15 +92,46 @@ def repo_root(start: Path | None = None) -> Path:
     raise ContractError(f"找不到仓库根：从 {here} 向上没有 {_REPO_MARKER}")
 
 
+def bundled_api_index_path() -> Path:
+    """随包分发的 ``api-index.json`` 副本路径（可能不存在，调用方自己判断）。"""
+
+    return _BUNDLED_API_INDEX
+
+
 def api_index_path() -> Path:
+    """``api-index.json`` 的位置：显式环境变量 → 仓库里那份 → 随包副本。"""
+
     env = os.environ.get(API_INDEX_ENV)
     if env:
         return Path(env).expanduser().resolve()
-    return repo_root() / _REPO_MARKER
+    try:
+        candidate = repo_root() / _REPO_MARKER
+    except ContractError:
+        candidate = None
+    if candidate is not None and candidate.is_file():
+        return candidate
+    # 仓库走查失败 = 包已经离开源码树（pip 安装 / 只拷了 src/grouppig）。
+    # 这时用随包副本，而不是让 import 期的契约断言把整个包打死。
+    if _BUNDLED_API_INDEX.is_file():
+        return _BUNDLED_API_INDEX
+    if candidate is not None:
+        return candidate  # 路径在但文件缺：保持原语义，让下游报「文件不存在」
+    raise ContractError(f"找不到 {_REPO_MARKER.name}：既不在仓库里，也没有随包副本 {_BUNDLED_API_INDEX}")
 
 
 def modules_dir() -> Path:
-    return api_index_path().parent / "modules"
+    """模块 Markdown 目录（仓库里是 ``normify-grouppig/modules``）。
+
+    安装态若用随包副本，则优先用随包分发的 ``_data/modules``（由 hatch 的
+    ``force-include`` 打进 wheel）；没有就维持原语义，让 :func:`modules` 报清楚的错。
+    """
+
+    index = api_index_path()
+    if index == _BUNDLED_API_INDEX:
+        bundled = _BUNDLED_DATA / "modules"
+        if bundled.is_dir():
+            return bundled
+    return index.parent / "modules"
 
 
 @lru_cache(maxsize=1)
@@ -259,6 +300,7 @@ __all__ = [
     "api_index",
     "api_index_path",
     "assert_known_name",
+    "bundled_api_index_path",
     "check_registry",
     "container_ids",
     "is_known_name",

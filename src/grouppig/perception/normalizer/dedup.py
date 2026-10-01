@@ -117,8 +117,6 @@ class Deduper:
         # 累计出现次数（含本条，重复投递也计入）：第 repeat_threshold 次相同内容即判定复读
         repeat_count = counts.get(fingerprint, 0) + 1
         repeat = repeat_count >= self.repeat_threshold
-        if duplicate:
-            counts[fingerprint] = repeat_count
 
         self.stats["checked"] += 1
         if duplicate:
@@ -130,9 +128,14 @@ class Deduper:
         if forward:
             self.stats["forwards"] += 1
 
-        if record and not duplicate:
+        if record:
+            # 计数必须与桶行**一一对应**：``_prune`` 只按弹出的桶行递减。旧实现给重复投递
+            # 只加计数、不落行，计数于是永远减不回 0 —— 窗口过期后 ``duplicate`` 永久为
+            # True，清洗器（``segment_duplicates`` 默认 False）就永久跳过 ``rpc:threads.segment``，
+            # ``哈哈哈`` / ``6`` / ``?`` / ``草`` 这类重复短句从此再也进不了聊天线编织，
+            # 而返回值还在谎报 ``window_seconds: 120``。
             counts[fingerprint] = repeat_count
-            if message_id:
+            if not duplicate and message_id:
                 seen_ids.add(message_id)
             bucket.append({"message_id": message_id, "content": content, "fingerprint": fingerprint, "ts": stamp})
 

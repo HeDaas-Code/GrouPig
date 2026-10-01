@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
 import pytest
 
 from grouppig.session.lifecycle.archive_trigger import ArchiveTrigger
@@ -14,6 +17,7 @@ from grouppig.session.lifecycle.state_machine import (
     new_session_id,
 )
 from grouppig.session.runtime.errors import InvalidTransition, SessionNotFound
+from grouppig.session.threads.weaver.linker import ThreadLinker
 from grouppig.session.topic.detector.boundary import BoundaryDetector, detect_boundary
 from grouppig.session.topic.detector.candidate import TopicCandidateGenerator, topic_phrase
 from grouppig.session.topic.detector.ranker import TopicRanker, score_candidate, topic_id_for
@@ -542,3 +546,127 @@ async def test_window_restarts_after_silence_and_can_be_disabled(config):
     async with build(config, window_messages=0) as (_container, off):
         assert [item["content"] for item in off.window_of(GROUP, first)] == ["第一条"]
         assert [item["content"] for item in off.window_of(GROUP, second)] == ["第二条"]
+
+
+# --------------------------------------------------------------------------
+# v0.2 加固：归档单飞 / 消息不丢
+# --------------------------------------------------------------------------
+async def test_concurrent_archive_saves_exactly_once():
+    """并发归档只能写一份档案、发一次事件。
+
+    归档有三个并发入口（sweeper 定时扫、on_message 的自动归档、显式
+    ``rpc:session.archive``），而事件总线用 ``asyncio.gather`` 并发分发。
+    此前只守卫了「状态转移」那一步，转移之后仍会无条件取消息、存档、发事件：
+    实测两个并发 archive() → ``counters["archived"]`` 只加 1，但
+    ``rpc:archive.save`` 写了两次、``session.completed`` 发了两次，
+    同一场会话于是被反思链路复盘两遍。
+    """
+
+    recorder = CallRecorder()
+    states = SessionStateMachine(caller=recorder, auto_archive=False)
+    opened = await states.open(GROUP, topic_id="t1", now=T0)
+    session_id = opened["session"]["session_id"]
+
+    first, second = await asyncio.gather(
+        states.archive(session_id, reason="sweeper", now=T0 + 10),
+        states.archive(session_id, reason="on_message", now=T0 + 10),
+    )
+
+    assert recorder.count("rpc:archive.save") == 1
+    assert states.counters["archived"] == 1
+    # 幂等：两次调用返回同一份档案
+    assert first["archive"] == second["archive"]
+    assert first["reason"] == second["reason"]
+
+
+async def test_archive_is_idempotent_on_repeat_call():
+    """重复归档直接返回同一份结果，不重复落库。"""
+
+    recorder = CallRecorder()
+    states = SessionStateMachine(caller=recorder, auto_archive=False)
+    opened = await states.open(GROUP, topic_id="t1", now=T0)
+    session_id = opened["session"]["session_id"]
+
+    first = await states.archive(session_id, reason="manual", now=T0 + 10)
+    second = await states.archive(session_id, reason="manual", now=T0 + 20)
+
+    assert recorder.count("rpc:archive.save") == 1
+    assert first["archive"] == second["archive"]
+
+
+async def test_reopening_a_session_id_invalidates_the_cached_archive():
+    """回归护栏：同一 session_id 被重新 open 后，归档缓存必须作废。"""
+
+    recorder = CallRecorder()
+    states = SessionStateMachine(caller=recorder, auto_archive=False)
+    await states.open(GROUP, session_id="s-fixed", topic_id="t1", now=T0)
+    await states.archive("s-fixed", reason="manual", now=T0 + 10)
+    assert recorder.count("rpc:archive.save") == 1
+
+    await states.open(GROUP, session_id="s-fixed", topic_id="t2", now=T0 + 100)
+    await states.archive("s-fixed", reason="manual", now=T0 + 200)
+    assert recorder.count("rpc:archive.save") == 2
+
+
+async def test_thread_linker_bookkeeping_update_does_not_archive_the_session():
+    """weave 里那次记账更新（记 thread_id）不得顺手归档会话。
+
+    这是消息丢失的根因：linker 的 ``sessions.update(..., advance=False)``
+    没有关掉 ``check_archive``，于是它可能在主流程（session/runtime/di.py 的
+    ``states.update``）之前就把会话归档掉，主流程随即撞上 ``InvalidTransition``
+    并被静默吞掉 —— 那条真实消息既不在任何会话里，也不在任何档案里。
+    """
+
+    class AlwaysArchive:
+        """永远建议归档的触发器：把「记账更新会不会顺手归档」逼出来。"""
+
+        async def check(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {"archive": True, "reasons": ["stub"]}
+
+    states = SessionStateMachine(archive_trigger=AlwaysArchive(), auto_archive=True)
+    opened = await states.open(GROUP, topic_id="t1", now=T0)
+    session_id = opened["session"]["session_id"]
+
+    # 对照组：check_archive 打开时确实会归档（证明这个触发器是有效的）
+    would_archive = await states.update(session_id, thread_ids=["t0"], now=T0 + 10, advance=False)
+    assert would_archive["archived"] is True
+
+    # 实验组：记账更新（check_archive=False）不得归档
+    again = await states.open(GROUP, session_id="s-keep", topic_id="t2", now=T0 + 100)
+    keep_id = again["session"]["session_id"]
+    result = await states.update(
+        keep_id,
+        thread_ids=["thread-1"],
+        now=T0 + 10_000,
+        advance=False,
+        check_archive=False,
+    )
+    assert result["archived"] is False
+    assert states.get(keep_id).state != SessionState.ARCHIVED
+
+
+async def test_thread_linker_passes_check_archive_false_to_its_bookkeeping_update():
+    """钉住 linker 的调用点：记账更新必须显式关掉 check_archive。
+
+    上一条用例只验证了 ``states.update(check_archive=False)`` 这个**契约**，
+    这条验证 weave 真的按契约调用 —— 否则根因（weave 顺手归档）依然存在。
+    """
+
+    class StubSessions:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def update(self, session_id: str, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append({"session_id": session_id, **kwargs})
+            return {"session": {"session_id": session_id}}
+
+    stub = StubSessions()
+    linker = ThreadLinker(sessions=stub)
+    messages = make_messages(["烤肉真好吃", "烤肉配啤酒最棒"], step=2)
+
+    await linker.weave(GROUP, messages, session_id="s-link", topic_id="t1", now=messages[-1]["ts"])
+
+    assert stub.calls, "weave 应当把 thread_id 记回会话"
+    bookkeeping = stub.calls[-1]
+    assert bookkeeping["advance"] is False
+    assert bookkeeping["check_archive"] is False, "记账更新不得触发归档（否则真实消息会被静默丢弃）"

@@ -232,3 +232,90 @@ def test_repo_config_contains_no_secret_literals(config_file: Path):
         key = stripped.split("=", 1)[0].strip().lower()
         assert key not in secret_keys, f"第 {lineno} 行疑似写了密钥字面量：{stripped}"
     assert "sk-" not in text
+
+
+# ---- app.integration 的取值校验 ------------------------------------------
+# `IntegrationOptions.from_config` 的 `_flag/_number/_integer` 是**容错**读取器：
+# 非法值静默回落到默认。容错本身没错（旧配置还能跑），但静默会让「配错了」和
+# 「没配」长得一模一样 —— 比如 `drain_interval = 0` 会让泵空转烧一个核。
+# 所以这些键必须在校验器里**报错**，而不是靠读取器兜底。
+_BAD_INTEGRATION_VALUES = (
+    ("drain_interval", 0),
+    ("drain_interval", -5),
+    ("drain_interval", "0.5"),
+    ("profile_interval", 0),
+    ("profile_interval", -5.0),
+    ("sweep_interval", 0),
+    ("drain_batch", 0),
+    ("drain_batch", -1),
+    ("drain_batch", "lots"),
+    ("profile_window_seconds", 0),
+    ("profile_min_messages", 0),
+    ("flow_max_steps", 0),
+    ("migrate", "maybe"),
+    ("pumps", "yes"),
+    ("connect", 1),
+)
+
+
+@pytest.mark.parametrize(("key", "value"), _BAD_INTEGRATION_VALUES)
+def test_invalid_app_integration_value_is_an_error(config: Config, key: str, value):
+    """非法 `app.integration.*` 必须是 error（不是 warning，更不是静默回落）。"""
+
+    report = validate_config(config.with_overrides({"app": {"integration": {key: value}}}))
+    assert report.ok is False, f"{key}={value!r} 被静默接受了"
+    assert any(issue.path == f"app.integration.{key}" for issue in report.errors), report.as_dict()
+
+
+def test_valid_app_integration_values_pass(config: Config):
+    """合法取值不能被误报（校验只针对真非法的）。"""
+
+    report = validate_config(
+        config.with_overrides(
+            {
+                "app": {
+                    "integration": {
+                        "drain_interval": 0.25,
+                        "profile_interval": 30,
+                        "sweep_interval": 60.0,
+                        "drain_batch": 64,
+                        "profile_window_seconds": 900,
+                        "profile_min_messages": 2,
+                        "flow_max_steps": 8,
+                        "migrate": False,
+                        "sweep": True,
+                        "pumps": True,
+                        "flow_send_via_topic": False,
+                        "pump_first_tick_immediate": False,
+                        "demux_pump": True,
+                        "connect": True,
+                        "dsn": "sqlite+aiosqlite:///:memory:",
+                    }
+                }
+            }
+        )
+    )
+    assert report.ok, report.as_dict()
+
+
+def test_unknown_app_integration_key_warns(config: Config):
+    """未知的 `app.integration.*` 子键要提醒（多半是拼写错误）。"""
+
+    report = validate_config(config.with_overrides({"app": {"integration": {"drain_bat": 64}}}))
+    assert any(issue.level == "warning" and "drain_bat" in issue.path for issue in report.issues), report.as_dict()
+
+
+def test_shipped_config_has_no_false_unknown_section_warning(config: Config):
+    """仓库配置里真实存在的段不该被报「未知顶层配置表」。"""
+
+    report = validate_config(config)
+    unknown = [issue for issue in report.warnings if issue.code == "unknown-key"]
+    assert unknown == [], [str(issue) for issue in unknown]
+
+
+def test_genuinely_unknown_top_level_section_still_warns(config: Config):
+    """别把警告静音了：真拼错的顶层段仍要报出来。"""
+
+    report = validate_config(config.with_overrides({"preception": {"interrupt": {"threshold": 0.5}}}))
+    unknown = [issue for issue in report.warnings if issue.code == "unknown-key"]
+    assert [issue.path for issue in unknown] == ["preception"]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from grouppig.social.graph.manager.egonet import (
     AFFINITY_EDGE,
     SELF_NODE_ID,
@@ -359,6 +361,60 @@ async def test_relationship_adjust_requires_user_id(config):
             assert "user_id" in str(error)
         else:  # pragma: no cover
             raise AssertionError("应当要求 user_id")
+    finally:
+        await env.aclose()
+
+
+@pytest.mark.parametrize("others", [299, 300])
+async def test_relationship_adjust_ignores_the_top_n_edge_window(config, others):
+    """关系分调整必须读「本人那条边」，不能被全局 top-N 截断。
+
+    旧实现按 ``weight`` 倒序取前 300 条边再在内存里索引：群里被追踪的成员一旦超过 300 人，
+    排在窗口外的人直接消失 → ``before`` 取 0 → 衰减被跳过，分层器又按 ``score`` **绝对值**
+    覆盖写入，于是同一次 ``being_replied`` 在 299 人时是 63 分 / 熟识、300 人时掉到 3 分 /
+    陌生（分数被永久钉死在窗口外）。``others=299`` 是边界内侧的对照。
+    """
+
+    env = await social_env(config)
+    try:
+        # 300 个高权重群友把目标挤出「按 weight 倒序取前 300」的窗口
+        for offset in range(others):
+            await env.stores.social.put_edge(affinity_edge(2000 + offset, 80.0, weight=1000.0))
+        await env.stores.social.put_edge(affinity_edge(1001, 60.0, weight=60.0))
+
+        result = await env.call("rpc:relationship.adjust", 1001, group_id=GROUP_ID, event="being_replied", decay=False)
+
+        assert result["score_before"] == 60.0
+        assert result["score"] == 63.0
+        assert result["tier"] == "friend"
+        edge = (await env.edges(src_id=SELF_NODE_ID, dst_id=1001, edge_type=AFFINITY_EDGE))[0]
+        assert edge["attrs"]["score"] == 63.0
+
+        # 读路径同样不能被 top-N 截断
+        read = await env.call("rpc:relationship.get", 1001, group_id=GROUP_ID)
+        assert read["found"] is True
+        assert read["score"] == 63.0
+    finally:
+        await env.aclose()
+
+
+async def test_relationship_adjust_decays_out_of_window_member(config):
+    """窗口外的成员同样要走时间衰减（旧实现连 ``rpc:relationship.decay`` 都收不到他）。"""
+
+    env = await social_env(config)
+    try:
+        for offset in range(300):
+            await env.stores.social.put_edge(affinity_edge(2000 + offset, 80.0, weight=1000.0))
+        await env.stores.social.put_edge(affinity_edge(1001, 60.0, weight=60.0))
+        env.clock.advance_days(60)
+
+        result = await env.call("rpc:relationship.adjust", 1001, group_id=GROUP_ID, event="agreed", decay=True)
+
+        assert result["decay"] is not None, "窗口外成员被漏掉 → 衰减整段跳过"
+        assert result["decay"]["decayed"] == 1
+        decayed = result["decay"]["decays"][1001]["new_score"]
+        assert decayed < 60.0
+        assert result["score"] == round(decayed + 2.0, 4)
     finally:
         await env.aclose()
 

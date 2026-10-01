@@ -96,6 +96,10 @@ SCORE_SOFT_SCALE = 100.0
 #: 单次调整的绝对值上限（防止一次事件把关系分打满/打空）。
 MAX_SINGLE_DELTA = 15.0
 
+#: 读「某人自己的边」时的条数上限：同一成员在每个群理论上只有一条 affinity 边，
+#: 这里只是防御式上限（真正的修复是**按 dst 定位**，而不是拿它当全局 top-N 窗口）。
+MEMBER_EDGE_LIMIT = 300
+
 
 def event_delta(event: str | None, *, default: float = 0.0) -> float:
     """事件 → 权重。"""
@@ -147,11 +151,15 @@ class RelationshipRules:
     ) -> dict[str, Any]:
         """读关系分（``user_id`` 为空时返回整张网）。"""
 
-        rows = (
-            [dict(row) for row in edges if isinstance(row, Mapping)]
-            if edges is not None
-            else await self._read_edges(group_id=group_id, limit=limit)
-        )
+        if edges is not None:
+            rows = [dict(row) for row in edges if isinstance(row, Mapping)]
+        elif user_id is not None:
+            # 点名读某人必须**直接读他那条边**：整网读取是按 ``weight`` 倒序的 top-N，
+            # 成员数超过 N 时目标会掉出窗口，于是被读成 found=False / score=None
+            # （实测恰好在第 300 条处断崖）。
+            rows = await self._read_member_edges(int(user_id), group_id=group_id)
+        else:
+            rows = await self._read_edges(group_id=group_id, limit=limit)
         index = affinity_index(rows, self_id=self.self_id)
         scores = [score for score in (edge_score(edge) for edge in index.values()) if score is not None]
         response: dict[str, Any] = {
@@ -204,7 +212,7 @@ class RelationshipRules:
         step = float(delta if delta is not None else event_delta(event))
         capped = max(-self.max_delta, min(self.max_delta, step))
 
-        edges = await self._read_edges(group_id=group_id, limit=300)
+        edges = await self._read_member_edges(member, group_id=group_id)
         current = await self.get(member, group_id=group_id, edges=edges)
         before = float(current.get("score") or 0.0)
 
@@ -269,6 +277,26 @@ class RelationshipRules:
         }
 
     # ---- 内部 ----------------------------------------------------------
+    async def _read_member_edges(self, member: int, *, group_id: int | None) -> list[dict[str, Any]]:
+        """只读「自己 → 该成员」的 affinity 边（按 ``dst_id`` 精确定位，不做全局 top-N 扫描）。
+
+        旧实现读全局前 300 条边（``order="weight"``）再在内存里索引：群里被追踪的成员一旦
+        超过 300 人，排在窗口外的人就从索引里消失 → ``before`` 取 0 → 衰减被跳过，而分层器
+        （``tiering._write_affinity``）是按 ``attrs["score"]`` **绝对值**覆盖写入的，于是同一个
+        ``being_replied`` 在 299 人时是 63 分 / 熟识、300 人时掉成 3 分 / 陌生，并永久钉在窗口外。
+        """
+
+        kwargs: dict[str, Any] = {
+            "src_id": int(self.self_id),
+            "dst_id": int(member),
+            "edge_type": AFFINITY_EDGE,
+            "order": "weight",
+            "limit": MEMBER_EDGE_LIMIT,
+        }
+        if group_id is not None:
+            kwargs["group_id"] = int(group_id)
+        return _as_edges(await self.ctx.call(DEP_SOCIAL_GET_EDGES, **kwargs))
+
     async def _read_edges(self, *, group_id: int | None, limit: int) -> list[dict[str, Any]]:
         kwargs: dict[str, Any] = {
             "src_id": int(self.self_id),
@@ -337,6 +365,7 @@ __all__ = [
     "EVENT_DELTAS",
     "EVENT_EDGE_TYPES",
     "MAX_SINGLE_DELTA",
+    "MEMBER_EDGE_LIMIT",
     "MODULE_ID",
     "NEGATIVE_EVENTS",
     "POSITIVE_EVENTS",

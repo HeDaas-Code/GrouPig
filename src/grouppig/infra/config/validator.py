@@ -18,6 +18,10 @@ REQUIRED_SECTIONS = ("app", "logging", "storage", "onebot", "model", "token")
 REQUIRED_MODEL_TASKS = ("chat", "classify", "embed")
 KNOWN_SCENARIOS = ("smalltalk", "chat", "discussion", "reflection", "classify", "embed")
 STORAGE_DSN_PREFIX = {"sqlite": ("sqlite",), "mysql": ("mysql",)}
+#: 顶层配置表白名单。**只列真的会被读的段**：多列一段就等于把一条真警告静音，
+#: 少列一段就会对合法配置天天喊狼来了（`[perception.interrupt]` 曾经就是这样，
+#: 而 perception 域确实读 `perception.*`，见 `perception/runtime/config.py`；
+#: `[persona]` 由 `expression/persona/profile.py` 整表读取）。
 KNOWN_TOP_LEVEL = (
     "app",
     "logging",
@@ -26,7 +30,31 @@ KNOWN_TOP_LEVEL = (
     "model",
     "token",
     "bus",
+    "perception",
+    "persona",
+    # `[panel]` 由 `panel/web.py` 的 PanelSettings.from_config 读取（token / allow_remote）。
+    "panel",
 )
+
+#: `[app.integration]` 的布尔开关。
+INTEGRATION_FLAG_KEYS = (
+    "migrate",
+    "sweep",
+    "flow_send_via_topic",
+    "pumps",
+    "pump_first_tick_immediate",
+    "demux_pump",
+    "connect",
+)
+#: `[app.integration]` 里必须 > 0 的周期（秒）。
+#:
+#: 0 / 负数不是「跑得快一点」：`runtime/pumps.py` 把间隔钳到 0.0 后
+#: `asyncio.sleep(0)` 会变成忙循环（实测 0.3s 内 35846 拍，吃满一个核）。
+INTEGRATION_INTERVAL_KEYS = ("drain_interval", "profile_interval", "sweep_interval")
+#: `[app.integration]` 里必须 >= 1 的计数。
+INTEGRATION_COUNT_KEYS = ("drain_batch", "profile_window_seconds", "profile_min_messages", "flow_max_steps")
+#: `[app.integration]` 里的嵌套配置表。
+INTEGRATION_TABLE_KEYS = ("session_options", "gateway_options")
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +136,58 @@ def _check_range(
         report.error("range", path, f"应 >= {minimum}，得到 {value}")
     if maximum is not None and value > maximum:
         report.error("range", path, f"应 <= {maximum}，得到 {value}")
+
+
+def _is_number(value: Any) -> bool:
+    """真数值判断：``bool`` 是 ``int`` 的子类，但 ``true`` 不是数字。"""
+
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _check_integration_options(report: ValidationReport, config: Config) -> None:
+    """校验 ``[app.integration]``。
+
+    `IntegrationOptions.from_config` 用的是**容错**读取器（`_flag/_number/_integer`）：
+    非法值静默回落到代码默认。容错本身有用（旧配置不至于起不来），但静默会让
+    「配错了」和「没配」长得一模一样，后果还不小：
+
+    * ``drain_interval = 0`` → 泵空转（`pumps.py` 钳到 0.0 后 `asyncio.sleep(0)`）；
+    * ``drain_batch = "lots"`` → 回落成 0，感知缓冲永远排不空，而 `status()` 还报健康；
+    * ``migrate = "maybe"`` → 回落成 False，于是「该建表」变成「不建表」。
+
+    所以这些键必须在校验器里报 **error**，让装配直接失败。
+    """
+
+    section = config.get("app.integration")
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        report.error("type", "app.integration", f"应为配置表，得到 {type(section).__name__}")
+        return
+    for key, value in section.items():
+        path = f"app.integration.{key}"
+        if key in INTEGRATION_FLAG_KEYS:
+            if not isinstance(value, bool):
+                report.error("type", path, f"应为 bool，得到 {type(value).__name__}（{value!r}）")
+        elif key in INTEGRATION_INTERVAL_KEYS:
+            if not _is_number(value):
+                report.error("type", path, f"应为数值（秒），得到 {type(value).__name__}（{value!r}）")
+            elif value <= 0:
+                report.error("range", path, f"应 > 0（0/负间隔会让周期泵忙循环），得到 {value}")
+        elif key in INTEGRATION_COUNT_KEYS:
+            if not isinstance(value, int) or isinstance(value, bool):
+                report.error("type", path, f"应为整数，得到 {type(value).__name__}（{value!r}）")
+            elif value < 1:
+                report.error("range", path, f"应 >= 1，得到 {value}")
+        elif key == "dsn":
+            if not isinstance(value, str) or not value.strip():
+                report.error("type", path, "应为非空 DSN 字符串")
+        elif key in INTEGRATION_TABLE_KEYS:
+            if not isinstance(value, dict):
+                report.error("type", path, f"应为配置表，得到 {type(value).__name__}")
+        else:
+            # 未知子键多半是拼写错误（`drain_bat`），提醒但不拦启动。
+            report.warn("unknown-key", path, "未知的 app.integration 子键（拼写错误？）")
 
 
 def validate_config(config: Config) -> ValidationReport:
@@ -224,6 +304,13 @@ def validate_config(config: Config) -> ValidationReport:
     # bus
     _check_type(report, config, "bus.strict_topics", (bool,))
     _check_range(report, config, "bus.handler_timeout", minimum=0.0)
+
+    # app.integration（集成层的可调参数：非法取值必须拦在启动前）
+    _check_integration_options(report, config)
+
+    # panel（只读面板的访问控制：密钥类型错了就等于没设）
+    _check_type(report, config, "panel.token", (str,))
+    _check_type(report, config, "panel.allow_remote", (bool,))
 
     return report
 

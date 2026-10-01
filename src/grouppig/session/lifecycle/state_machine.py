@@ -35,6 +35,7 @@ archived     终态（唤醒走 ``grouppig.session.wake`` 的缓冲，不改状�
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from collections.abc import Mapping, Sequence
@@ -264,6 +265,9 @@ class SessionStateMachine:
         self.auto_archive = bool(auto_archive)
         self.clock = clock
         self._sessions: dict[str, Session] = {}
+        #: 单飞归档：每个 session_id 一把锁 + 一份已归档结果（幂等返回同一份档案）。
+        self._archive_locks: dict[str, asyncio.Lock] = {}
+        self._archives: dict[str, dict[str, Any]] = {}
         self.counters = {"opened": 0, "updated": 0, "archived": 0, "cooled": 0, "reopened": 0, "rejected": 0}
 
     # ---- rpc:session.open ---------------------------------------------
@@ -322,6 +326,8 @@ class SessionStateMachine:
         else:
             self._transition(session, SessionState.ACTIVE, now=stamp, reason="open")
         self._sessions[session.session_id] = session
+        # 同一个 session_id 被重新 open 时，旧的归档结果必须作废
+        self._archives.pop(session.session_id, None)
         self.counters["opened"] += 1
         self._prune()
         if self.logger is not None:
@@ -503,6 +509,53 @@ class SessionStateMachine:
 
         stamp = float(now if now is not None else self.clock())
         session = self._resolve(session_id, group_id=group_id)
+
+        # 归档必须单飞 + 幂等。
+        #
+        # 此前只守卫了「状态转移」那一步，转移之后仍会无条件取消息、存档案、发事件。
+        # 而归档有三个并发入口（SessionSweeper 定时扫、SessionLayer.on_message 的
+        # 自动归档、显式 rpc:session.archive），且事件总线用 asyncio.gather 并发分发，
+        # 所以两个 archive() 抢到一起时：counters["archived"] 只加 1，
+        # 但 rpc:archive.save 会写两次、session.completed 会发两次（实测复现）。
+        # 后果是同一场会话在反思链路里被复盘两遍。
+        key = session.session_id
+        lock = self._archive_locks.get(key)
+        if lock is None:
+            lock = self._archive_locks[key] = asyncio.Lock()
+        async with lock:
+            cached = self._archives.get(key)
+            if cached is not None:
+                # 已经归档过：返回同一份档案，不重复落库、不重复发事件
+                return cached
+            result = await self._archive_locked(
+                session,
+                stamp=stamp,
+                reason=reason,
+                messages=messages,
+                threads=threads,
+                heat=heat,
+                summary=summary,
+                save=save,
+                emit=emit,
+            )
+            self._archives[key] = result
+            return result
+
+    async def _archive_locked(
+        self,
+        session: Session,
+        *,
+        stamp: float,
+        reason: str,
+        messages: Sequence[Mapping[str, Any]] | None,
+        threads: Sequence[Mapping[str, Any]] | None,
+        heat: Mapping[str, Any] | None,
+        summary: str | None,
+        save: bool,
+        emit: bool,
+    ) -> dict[str, Any]:
+        """真正的归档工作（调用方已持有该会话的归档锁）。"""
+
         if session.state != SessionState.ARCHIVED:
             self._transition(session, SessionState.ARCHIVED, now=stamp, reason=reason)
             self.counters["archived"] += 1
@@ -582,6 +635,8 @@ class SessionStateMachine:
     def clear(self) -> int:
         removed = len(self._sessions)
         self._sessions.clear()
+        self._archives.clear()
+        self._archive_locks.clear()
         return removed
 
     # ---- 内部 ----------------------------------------------------------
@@ -630,6 +685,9 @@ class SessionStateMachine:
         archived.sort(key=lambda item: item.updated_at)
         for session in archived[: len(self._sessions) - self.max_sessions]:
             self._sessions.pop(session.session_id, None)
+            # 归档缓存随会话一起回收，否则进程内状态只增不减
+            self._archives.pop(session.session_id, None)
+            self._archive_locks.pop(session.session_id, None)
 
     async def _fetch_messages(self, message_ids: Sequence[str]) -> list[dict[str, Any]]:
         if self.caller is None:

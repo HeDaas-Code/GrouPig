@@ -86,34 +86,40 @@ def run(
     options: SnapshotOptions | None = None,
     once: bool = False,
     max_frames: int | None = None,
+    provider: Any = None,
 ) -> int:
-    """运行终端面板；返回进程退出码（0 正常）。"""
+    """运行终端面板；返回进程退出码（0 正常）。
+
+    ``provider`` 是「取一份快照」的可调用对象（CLI 用它把表行数走异步查）；
+    不传就按 ``build_snapshot(app, options)`` 直接渲染。
+    """
 
     options = options or SnapshotOptions()
+    take = provider if provider is not None else (lambda: build_snapshot(app, options))
     if once:
-        print(render_text(build_snapshot(app, options)))
+        print(render_text(take()))
         return 0
     try:
         import curses
     except ImportError:  # pragma: no cover - 非 Unix 平台
-        print(render_text(build_snapshot(app, options)))
+        print(render_text(take()))
         return 0
     try:
         screen = curses.initscr()
     except Exception:
         print("当前环境没有可用 TTY：已降级为文本模式（用 --once 获取一次性快照）")
-        print(render_text(build_snapshot(app, options)))
+        print(render_text(take()))
         return 0
     frames = 0
     if not _prepare(screen, curses):
         _teardown(screen, curses)
         print("当前环境没有可用 TTY：已降级为文本模式（用 --once 获取一次性快照）")
-        print(render_text(build_snapshot(app, options)))
+        print(render_text(take()))
         return 0
     try:
         while True:
             screen.erase()
-            for index, line in enumerate(render_text(build_snapshot(app, options)).splitlines()):
+            for index, line in enumerate(render_text(take()).splitlines()):
                 try:
                     screen.addstr(index, 0, line[: curses.COLS - 1])
                 except curses.error:  # pragma: no cover - 屏幕太小

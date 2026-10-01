@@ -185,6 +185,27 @@ class BehaviorAggregator:
         sustained = streak if streak_behavior == candidate else 0
         return sustained + 1 >= self.switch_confirmations
 
+    @staticmethod
+    def _window_messages(group_id: int, window: Any, seconds: float, now: float) -> list[dict[str, Any]]:
+        """把滚动时间窗按群物化成真实消息行（判别器只吃行，不吃窗口对象）。
+
+        用 ``RollingWindow.slice``（窗口自己的 API，与 ``interrupt.scorer`` 同一写法）而不是
+        通用取行助手：一个 ``RollingWindow`` 实例装着**所有群**的桶，不传 ``group_id`` 就会
+        把别的群的消息混进本群的转写里。
+        """
+
+        slicer = getattr(window, "slice", None)
+        if not callable(slicer):
+            return []
+        try:
+            sliced = slicer(int(group_id), seconds=float(seconds), now=float(now))
+        except TypeError:  # pragma: no cover - 非标准窗口对象的签名差异
+            return []
+        except Exception:  # noqa: BLE001 - 取行失败不该拖垮整次分类（判别器会降级成空窗口）
+            return []
+        rows = sliced.get("messages") if isinstance(sliced, Mapping) else None
+        return [dict(row) for row in (rows or ()) if isinstance(row, Mapping)]
+
     def decide(
         self,
         *,
@@ -329,11 +350,21 @@ class BehaviorAggregator:
         shadow_llm: dict[str, Any] = {}
         if want_llm and (ambiguous or mode == "shadow"):
             self.stats["llm_calls"] += 1
+            # 判别器只认**消息行**：生产路径上 ``messages`` 恒为 None（featurizer 只透传
+            # ``window=``），而 ``source_window`` 是 RollingWindow **对象** —— 判别器既不是
+            # Mapping 也不是 Sequence，抽不出任何行，提示词以「群聊记录：」结尾。模型在
+            # 「一条消息都没有」的前提下给出的标签会被 :meth:`decide` 当成已定论（并立刻
+            # 顶掉未定论的在任行为、级联到插话闸门），所以这里按群把窗口物化成真实行。
+            judge_messages = (
+                list(messages)
+                if messages is not None
+                else self._window_messages(int(group_id), source_window, span, stamp)
+            )
             llm_outcome = await calls_module.call_leaf(
                 self.registry,
                 DOWNSTREAM_LLM,
                 lambda **kw: self.judge.judge(**kw),
-                messages,
+                messages=judge_messages,
                 window=source_window,
                 now=stamp,
             )

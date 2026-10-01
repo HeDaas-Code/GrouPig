@@ -12,6 +12,7 @@
 
     {
       "text": "生成出来的回复",          # 或 "segments"/"message"
+      "bubbles": ["先接一句", "再说正事"],  # 多气泡：按顺序分条发，条间按长度等待
       "group_id": 123, "user_id": 456,   # 二选一
       "reply_to": 789,                   # 引用的 message_id
       "at": [456], "emoji": [178],       # 提及与表情
@@ -21,7 +22,12 @@
 返回::
 
     {"ok": true, "sent": 1, "message_ids": [9001], "chunks": 1, "waited": 0.0,
-     "rate": {...}, "recorded": true, "skipped": false, "error": ""}
+     "rate": {...}, "recorded": true, "skipped": false, "error": "",
+     "bubbles": [], "bubble_count": 0, "batch": "..."}
+
+``bubbles`` 非空表示这一条回复是**分条**发出去的（``sent`` / ``message_ids`` / ``chunks``
+是各条的汇总，``batch`` 是整条回复共用的撤回批次）；只给 ``text`` 的老调用方
+拿到的是与改动前逐字相同的返回体（``bubbles`` 为空、``bubble_count`` 为 0）。
 
 normify id: ``grouppig.gateway.sender.composer``（叶子模块）。
 """
@@ -47,6 +53,54 @@ CHAT_APPEND = "rpc:chat.append"
 DEFAULT_MAX_LENGTH = 400
 DEFAULT_EMOJI_POOL: tuple[int, ...] = (178, 179, 182, 187)
 _SPLIT_PRIORITY = "。！？!?…；;\n，,、 "  # 优先在这些字符后断句
+
+# --------------------------------------------------------------------------
+# 多气泡（human-like pacing）
+# --------------------------------------------------------------------------
+#: 两条气泡之间的等待：``min(MAX, BASE + PER_CHAR * len(气泡))``。
+#: 人在群里说话是「打一句 → 发 → 再打下一句」，等待应当与**这一条**的长度成正比；
+#: 一次把整段吐出去（或反过来，每句都卡满 3 秒）都不像人。
+BUBBLE_DELAY_BASE = 0.4
+BUBBLE_DELAY_PER_CHAR = 0.05
+MAX_BUBBLE_DELAY = 3.0
+#: 节流倍率：生产默认 1.0（真的等），测试传 0.0（一次都不等）。
+#: 它是**倍率**而不是秒数，这样调用方既能整体关掉，也能整体调快/调慢。
+DEFAULT_BUBBLE_DELAY = 1.0
+
+
+def bubble_pause(bubble: str, *, scale: float = DEFAULT_BUBBLE_DELAY) -> float:
+    """发下一条气泡前的等待秒数（纯函数，可断言）。
+
+    ``scale <= 0`` 直接返回 0：调用方（单测、压测、限速严格的环境）据此把等待整体关掉，
+    而不是靠「把秒数调得足够小」来蒙混——那样仍然会真的 await 一次事件循环。
+    """
+
+    if scale <= 0:
+        return 0.0
+    length = len(str(bubble or ""))
+    return round(min(MAX_BUBBLE_DELAY, BUBBLE_DELAY_BASE + BUBBLE_DELAY_PER_CHAR * length) * float(scale), 4)
+
+
+def normalize_bubbles(raw: Any) -> list[str]:
+    """规整气泡列表：丢掉空串、合并**相邻**重复。
+
+    相邻重复合并是刻意的：多轮计划里模型对每一步给出同一句话时，
+    连发两条一模一样不是「像人」，是 bug。非相邻的重复保留（人也会重复自己说过的话）。
+    """
+
+    if raw is None:
+        return []
+    items = [raw] if isinstance(raw, str) else list(raw) if isinstance(raw, Sequence) else []
+    out: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if out and out[-1] == text:
+            continue
+        out.append(text)
+    return out
+
 
 #: ``rpc:rate.wait`` 的默认等待上限（秒）。
 #:
@@ -150,6 +204,8 @@ class ReplyComposer:
         self_id: int | None = None,
         gate: Any = None,
         rate_max_wait: float | None = DEFAULT_RATE_MAX_WAIT,
+        bubble_delay: float = DEFAULT_BUBBLE_DELAY,
+        sleep: Any = None,
     ) -> None:
         self.adapter = adapter
         self.limiter = limiter
@@ -171,6 +227,10 @@ class ReplyComposer:
         #: 取值为 callable 时每轮发送前求值；为 None 表示不设闸。
         self.gate = gate
         self.rate_max_wait = rate_max_wait
+        #: 多气泡之间的等待倍率（见 :func:`bubble_pause`）；``send_reply(bubble_delay=...)`` 可逐次覆盖。
+        self.bubble_delay = max(0.0, float(bubble_delay))
+        #: 可注入的 sleep：单测传假件就一次真实等待都不会发生（延迟断言仍然可测）。
+        self._sleep = sleep if sleep is not None else asyncio.sleep
         self.stats = ComposerStats()
         self._emoji_cursor = 0
         self._tasks: set[Any] = set()
@@ -362,20 +422,47 @@ class ReplyComposer:
         max_wait: float | None = None,
         record: bool | None = None,
         force: bool = False,
+        bubbles: Sequence[str] | str | None = None,
+        bubble_delay: float | None = None,
+        batch: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """发送入口：总闸 → 节流 → 包装 → 逐条发送 → 记流水。
 
         ``force=True`` 绕过 ``/闭嘴`` 总闸，只给「命令自身的回执」用：
         用户说 ``/闭嘴`` 时必须还能收到「好，我闭嘴。」，否则开关一关就再也喊不回来。
+
+        多气泡：``reply``（或显式 ``bubbles=``）里给了 ``bubbles`` 时，按顺序**分条**发送，
+        每条之间按 :func:`bubble_pause` 等待（``bubble_delay`` 覆盖实例默认倍率）。
+        只给 ``text`` 的老调用方走原来的单条路径，返回体与行为都不变。
         """
 
         if isinstance(reply, Mapping):
             group_id = reply.get("group_id", group_id)
             user_id = reply.get("user_id", user_id)
             source = str(reply.get("source", source) or source)
+            if bubbles is None:
+                bubbles = reply.get("bubbles")
         if group_id is None and user_id is None:
             return self._result(ok=False, error="missing_target", reason="group_id/user_id 至少给一个")
+
+        # 多气泡：显式给了 bubbles 就由它说了算（``text`` 只是「最后一条」的旧字段）。
+        queue = normalize_bubbles(bubbles)
+        if queue:
+            return await self._send_bubbles(
+                queue,
+                reply=reply,
+                group_id=group_id,
+                user_id=user_id,
+                source=source,
+                force=force,
+                record=record,
+                drop_if_limited=drop_if_limited,
+                max_wait=max_wait,
+                bubble_delay=bubble_delay,
+                batch=batch,
+                wrap_kwargs=kwargs,
+            )
 
         # 总闸：`/闭嘴` 之后必须真的不再出站。
         # 此前 features 只被 gateway.status() 读出来展示，没有任何发送路径消费它，
@@ -490,7 +577,8 @@ class ReplyComposer:
                 composed, group_id=group_id, user_id=user_id, source=source, message_ids=message_ids
             )
         # 整批登记（不只第一条）：超长回复被切成多条时，「撤回」必须能把整批删干净。
-        batch = f"{source or 'reply'}:{int(self._clock() * 1000)}:{target}"
+        # 多气泡回复由 ``_send_bubbles`` 传同一个 ``batch`` 下来，整条回复也能一次撤干净。
+        batch_id = batch or f"{source or 'reply'}:{int(self._clock() * 1000)}:{target}"
         if self.retractor is not None and message_ids:
             with contextlib.suppress(Exception):
                 for message_id in message_ids:
@@ -500,7 +588,7 @@ class ReplyComposer:
                         user_id=user_id,
                         text=composed.text,
                         source=source,
-                        batch=batch,
+                        batch=batch_id,
                     )
         return self._result(
             ok=True,
@@ -512,7 +600,82 @@ class ReplyComposer:
             target=target,
             chunks=composed.chunk_count,
             text=composed.text,
-            batch=batch,
+            batch=batch_id,
+        )
+
+    async def _send_bubbles(
+        self,
+        bubbles: Sequence[str],
+        *,
+        reply: Any,
+        group_id: int | str | None,
+        user_id: int | str | None,
+        source: str,
+        force: bool,
+        record: bool | None,
+        drop_if_limited: bool,
+        max_wait: float | None,
+        bubble_delay: float | None,
+        batch: str | None,
+        wrap_kwargs: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """把一条回复按气泡**分条**发出：逐条走完整发送路径，条与条之间按长度等待。
+
+        为什么复用 :meth:`send_reply` 而不是在这里再实现一遍发送：
+        总闸、节流（含有限等待）、包装、切分、记流水、撤回登记全都只有一处实现，
+        多气泡路径不可能和单条路径漂移。代价是每条气泡各自过一次节流——
+        这正是我们要的（分条发送本来就该逐条受速率约束）。
+        """
+
+        scale = self.bubble_delay if bubble_delay is None else max(0.0, float(bubble_delay))
+        target: int | str = group_id if group_id is not None else user_id  # type: ignore[assignment]
+        batch_id = batch or f"{source or 'reply'}:{int(self._clock() * 1000)}:{target}"
+        # 引用/@/表情只挂第一条：每条气泡都引用同一条原文，看起来像刷屏而不是像人。
+        head_only = {
+            key: value
+            for key, value in (dict(reply) if isinstance(reply, Mapping) else {}).items()
+            if key in ("reply_to", "quote", "at", "mentions", "emoji")
+        }
+        results: list[dict[str, Any]] = []
+        for index, bubble in enumerate(bubbles):
+            if index:
+                pause = bubble_pause(bubble, scale=scale)
+                if pause > 0:
+                    await self._sleep(pause)
+            payload: dict[str, Any] = {"text": bubble, "group_id": group_id, "user_id": user_id, "source": source}
+            if index == 0:
+                payload.update(head_only)
+            result = await self.send_reply(
+                payload,
+                force=force,
+                record=record,
+                drop_if_limited=drop_if_limited,
+                max_wait=max_wait,
+                batch=batch_id,
+                bubble_delay=0.0,
+                **wrap_kwargs,
+            )
+            results.append(result)
+            if not result.get("ok"):
+                # 一条失败就停：半截回复比少发一条更难解释（失败原因已经记进 stats）。
+                break
+        failure = next((row for row in results if not row.get("ok")), None)
+        return self._result(
+            ok=bool(results) and all(row.get("ok") for row in results),
+            sent=sum(int(row.get("sent") or 0) for row in results),
+            message_ids=[mid for row in results for mid in (row.get("message_ids") or ())],
+            chunks=sum(int(row.get("chunks") or 0) for row in results),
+            waited=round(sum(float(row.get("waited") or 0.0) for row in results), 4),
+            recorded=bool(results) and all(bool(row.get("recorded")) for row in results),
+            skipped=bool(failure and failure.get("skipped")),
+            error=str((failure or {}).get("error") or ""),
+            reason=str((failure or {}).get("reason") or ""),
+            rate=(results[-1].get("rate") if results else None),
+            target=(results[-1].get("target") if results else None),
+            text="\n".join(bubbles),
+            bubbles=list(bubbles),
+            bubble_count=len(bubbles),
+            batch=batch_id,
         )
 
     async def _record(
@@ -595,6 +758,9 @@ class ReplyComposer:
             "target": None,
             "text": "",
             "batch": "",
+            # 多气泡字段：单条回复（老载荷）保持空，调用方据此区分「是否分条发过」。
+            "bubbles": [],
+            "bubble_count": 0,
         }
         result.update(fields)
         result["stats"] = self.stats.as_dict()
@@ -662,15 +828,21 @@ def register(registry: Any, composer: ReplyComposer) -> None:
 
 
 __all__ = [
+    "BUBBLE_DELAY_BASE",
+    "BUBBLE_DELAY_PER_CHAR",
     "CHAT_APPEND",
+    "DEFAULT_BUBBLE_DELAY",
     "DEFAULT_EMOJI_POOL",
     "DEFAULT_MAX_LENGTH",
+    "MAX_BUBBLE_DELAY",
     "MODULE_ID",
     "TOPIC_REPLY_COMPOSED",
     "ComposedReply",
     "ComposerStats",
     "ReplyComposer",
+    "bubble_pause",
     "make_handlers",
+    "normalize_bubbles",
     "register",
     "subscribe_reply_composed",
 ]

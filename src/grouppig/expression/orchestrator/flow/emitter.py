@@ -8,8 +8,9 @@
   调用 :meth:`FlowEmitter.reply_composed` 发布**回复编排完成事件**；
 * 下游订阅方是 ``grouppig.gateway.sender.composer``（``subscribe_reply_composed``）——
   它拿到载荷后走节流发送。因此**载荷字段必须与 composer 对得上**：
-  ``group_id`` / ``user_id`` / ``text`` / ``source`` 是 composer ``send_reply`` 直接读的键
-  （见 ``composer.send_reply`` 开头对 ``Mapping`` 的解包）。
+  ``group_id`` / ``user_id`` / ``text`` / ``bubbles`` / ``source`` 是 composer ``send_reply``
+  直接读的键（见 ``composer.send_reply`` 开头对 ``Mapping`` 的解包）。
+  ``bubbles`` 是**一条回复的有序气泡**；``text`` 仍是最后一条，只看 ``text`` 的老订阅方不受影响。
 
 **为什么发布不能抛**：发送是闭环的最后一环，编排成功但发布失败时，回复仍应尽量送出去
 （调用方拿到 ``ok=False`` 后可以退回直调 ``rpc:sender.send_reply``）。因此 :meth:`publish`
@@ -37,7 +38,7 @@ contract.assert_known_name(TOPIC_REPLY_COMPOSED)
 EVENT_REPLY_COMPOSED = "reply.composed"
 
 #: 载荷里 composer ``send_reply`` 直接读的键（改这里必须同步 composer）。
-COMPOSER_KEYS: tuple[str, ...] = ("group_id", "user_id", "text", "source")
+COMPOSER_KEYS: tuple[str, ...] = ("group_id", "user_id", "text", "bubbles", "source")
 
 #: 载荷的固定字段（顺序稳定，便于断言与落库）。
 PAYLOAD_FIELDS: tuple[str, ...] = (
@@ -48,6 +49,8 @@ PAYLOAD_FIELDS: tuple[str, ...] = (
     "user_id",
     "reply_to",
     "text",
+    "bubbles",
+    "bubble_count",
     "candidates",
     "candidate_count",
     "stage",
@@ -65,6 +68,7 @@ PAYLOAD_FIELDS: tuple[str, ...] = (
 def build_payload(
     *,
     text: str = "",
+    bubbles: Any = None,
     group_id: int = 0,
     user_id: int | None = None,
     reply_to: int | None = None,
@@ -80,11 +84,16 @@ def build_payload(
     composed_at: float = 0.0,
     source: str = MODULE_ID,
 ) -> dict[str, Any]:
-    """组 ``kafka:grouppig.reply.composed`` 的载荷（纯函数，可断言）。"""
+    """组 ``kafka:grouppig.reply.composed`` 的载荷（纯函数，可断言）。
+
+    ``bubbles`` 是**一条回复的有序气泡**（多轮计划里每个出文本的步骤一条）。
+    ``text`` 保留为「最后一条」，老订阅方（只看 ``text``）行为不变。
+    """
 
     plan = dict(plan or {})
     selection = dict(selection or {})
     candidate_list = [str(item) for item in (candidates or ()) if str(item).strip()]
+    bubble_list = [str(item) for item in (bubbles or ()) if str(item).strip()]
     return {
         "event": EVENT_REPLY_COMPOSED,
         "flow_id": str(flow_id or ""),
@@ -93,6 +102,8 @@ def build_payload(
         "user_id": int(user_id) if user_id is not None else None,
         "reply_to": int(reply_to) if reply_to is not None else None,
         "text": str(text or ""),
+        "bubbles": bubble_list,
+        "bubble_count": len(bubble_list),
         "candidates": candidate_list,
         "candidate_count": len(candidate_list),
         "stage": str(stage or ""),
@@ -178,6 +189,7 @@ class FlowEmitter:
             topic=topic,
             group_id=data.get("group_id"),
             text_chars=len(str(data.get("text") or "")),
+            bubble_count=len(data.get("bubbles") or ()),
             degraded=bool(data.get("degraded")),
         )
         self.last = {"ok": True, "topic": topic, "payload": data}

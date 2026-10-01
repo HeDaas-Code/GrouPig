@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from grouppig.infra.runtime.errors import HandlerNotRegistered
+from grouppig.perception.runtime.decision_cache import flow_idempotency_key
 
 #: 闭环里的契约名字（集成层直接调，不在本模块里重新定义归属）。
 RPC_DRAIN = "rpc:observer.buffer.drain"
@@ -183,6 +184,10 @@ class FlowDriver(_Pump):
     逐步 ``rpc:flow.next`` 直到 ``done``，最后 ``rpc:flow.end``（发送 + 发布 ``reply.composed``）。
 
     ``rpc:flow.start`` 是**异步**发生的（决策先发事件、再起流程），因此第一次取流程允许重试。
+
+    **按群去重**：同一条心流只允许一次驱动在飞（:meth:`trigger_key`）。触发事件是
+    at-least-once 的（感知冷却失效、上游重投、集成层重试都会重复投递），
+    不去重就会出现两次并发驱动 → 两条一模一样的群消息。
     """
 
     name = "expression.flow"
@@ -207,7 +212,11 @@ class FlowDriver(_Pump):
         self.retry_interval = max(0.0, float(retry_interval))
         self.subscription: Any = None
         self._inflight: set[asyncio.Task] = set()
-        self.stats.update({"triggered": 0, "driven": 0, "sent": 0, "published": 0, "no_flow": 0, "steps": 0})
+        #: 正在驱动的「群 → 触发键」：同一个群在飞期间只允许一次驱动（见 :meth:`_on_triggered`）。
+        self._driving: dict[str, int] = {}
+        self.stats.update(
+            {"triggered": 0, "coalesced": 0, "driven": 0, "sent": 0, "published": 0, "no_flow": 0, "steps": 0}
+        )
 
     # ---- 订阅 ----------------------------------------------------------
     def attach(self, bus: Any = None) -> Any:
@@ -238,6 +247,7 @@ class FlowDriver(_Pump):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self._inflight.clear()
+        self._driving.clear()
 
     async def wait_idle(self, timeout: float = 10.0) -> None:
         """等所有在飞的驱动任务收尾（测试与优雅关闭用）。"""
@@ -248,6 +258,16 @@ class FlowDriver(_Pump):
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=timeout)
 
+    @staticmethod
+    def trigger_key(group_id: int) -> str:
+        """触发去重键：同一个群恒等（用 ``perception`` 的 ``flow_idempotency_key`` 生成）。
+
+        刻意**不带观测窗口指纹**：这里要合并的是「这个群的心流正在被推进」这件事本身，
+        与它由哪一条观测窗口触发无关——同一窗口重复投递、或两个窗口先后触发都要合并。
+        """
+
+        return flow_idempotency_key(group_id=int(group_id), window_fp="")
+
     async def _on_triggered(self, event: Any) -> None:
         payload = getattr(event, "payload", event)
         if not isinstance(payload, Mapping):
@@ -256,11 +276,29 @@ class FlowDriver(_Pump):
         if not group_id:
             return
         self.stats["triggered"] += 1
+        # 按群去重：同一个群已经有一次驱动在飞时直接合并掉。
+        # 此前每条触发都无条件 create_task，两次触发会**并发**驱动同一条心流
+        # （各自的 rpc:flow.next / rpc:flow.end 交错），把一条回复发两遍。
+        # 检查与登记之间没有 await，因此在事件循环里是原子的。
+        key = self.trigger_key(group_id)
+        if key in self._driving:
+            self.stats["coalesced"] += 1
+            self._log("debug", "flow.trigger_coalesced", group_id=group_id)
+            return
+        self._driving[key] = group_id
         # 不能在发布路径里同步 drive：rpc:interrupt.decide 是「先发事件、再 rpc:flow.start」，
         # 同步驱动会在 flow 还没建起来时就把重试次数烧光（而且把发布方一起堵住）。
-        task = asyncio.create_task(self.drive(group_id), name="grouppig.runtime.flow-driver.drive")
+        task = asyncio.create_task(self._drive_keyed(key, group_id), name="grouppig.runtime.flow-driver.drive")
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
+
+    async def _drive_keyed(self, key: str, group_id: int) -> dict[str, Any]:
+        """带去重登记的驱动（无论成功、失败还是被取消都要把登记摘掉）。"""
+
+        try:
+            return await self.drive(group_id)
+        finally:
+            self._driving.pop(key, None)
 
     # ---- 驱动 ----------------------------------------------------------
     async def drive(self, group_id: int) -> dict[str, Any]:

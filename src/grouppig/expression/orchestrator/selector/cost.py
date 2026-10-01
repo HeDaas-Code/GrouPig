@@ -53,6 +53,12 @@ for _name in NAMES:
 DEP_PRESETS_MATCH = "rpc:presets.match"
 contract.assert_known_name(DEP_PRESETS_MATCH)
 
+#: 设计外补数：预设匹配要吃到「和这个人有多熟」。
+#: 设计没给 ``selector.cost`` 这条边，但少了它，行为预设对陌生人和死党给出同一套
+#: 回复概率/频率/语气——「亲密度影响说话方式」就只是文档里的一句话。
+DEP_RELATIONSHIP_GET = "rpc:relationship.get"
+contract.assert_known_name(DEP_RELATIONSHIP_GET)
+
 #: 中文字符（CJK 统一表意文字 + 全角标点）判定。
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]")
 
@@ -117,6 +123,10 @@ FEATURE_KEYS: tuple[str, ...] = (
     "phase",
     "keyword",
     "text",
+    # 关系维度：分层（close/friend/acquaintance/stranger）与绝对分（0-99）。
+    # 预设库据此在「熟人」和「陌生人」之间给出不同的回复概率与语气。
+    "tier",
+    "score",
 )
 
 
@@ -248,6 +258,8 @@ def build_features(
     focus: float | None = None,
     keyword: str = "",
     phase: str = "",
+    tier: str = "",
+    score: float | None = None,
     features: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """编排上下文 → ``rpc:presets.match`` 的 ``features``（只放有值的键）。"""
@@ -262,6 +274,8 @@ def build_features(
         "focus": focus,
         "keyword": keyword,
         "phase": phase or stage,
+        "tier": tier,
+        "score": score,
     }
     for key, value in explicit.items():
         if value is None or value == "":
@@ -354,6 +368,7 @@ class CostEstimator:
         scenario: str = "",
         stage: str = "",
         group_id: int = 0,
+        user_id: int | None = None,
         presets: Sequence[Mapping[str, Any]] | None = None,
         top: int | None = None,
         **feature_fields: Any,
@@ -362,6 +377,25 @@ class CostEstimator:
 
         self.picks += 1
         payload = build_features(scenario=scenario, stage=stage, features=features, **feature_fields)
+        degraded_paths: list[str] = []
+        # 亲密度是选预设的输入之一：给了 ``user_id`` 而调用方又没直接给 ``tier`` 时，
+        # 自己读一次 ``rpc:relationship.get``（social 域，返回 {found, score, tier, tier_label, ...}）。
+        # 读不到就照旧匹配、只记 degraded —— 「拿不到关系分」不该让选预设失败。
+        if user_id and "tier" not in payload:
+            relationship = await self._call(DEP_RELATIONSHIP_GET, int(user_id), group_id=int(group_id or 0))
+            if isinstance(relationship, Mapping):
+                tier = str(relationship.get("tier") or "")
+                if not tier and not relationship.get("found"):
+                    # 没有 affinity 边 = social 分层里的默认档（陌生）；显式说出来，
+                    # 免得「读不到」被当成「没有信息」而退回统一语气。
+                    tier = "stranger"
+                if tier:
+                    payload["tier"] = tier
+                score = relationship.get("score")
+                if score is not None:
+                    payload["score"] = round(float(score), 4)
+            else:
+                degraded_paths.append("relationship_unavailable")
         matched = await self._call(
             DEP_PRESETS_MATCH,
             payload,
@@ -369,7 +403,6 @@ class CostEstimator:
             presets=presets,
             top=int(top if top is not None else self.presets_top),
         )
-        degraded_paths: list[str] = []
         if isinstance(matched, Mapping):
             result = dict(matched)
             best = dict(result.get("best") or {})
@@ -447,6 +480,7 @@ __all__ = [
     "ACTION_KEYS",
     "DEFAULT_OUTPUT_TOKENS",
     "DEP_PRESETS_MATCH",
+    "DEP_RELATIONSHIP_GET",
     "FALLBACK_PRESET",
     "FEATURE_KEYS",
     "MODULE_ID",

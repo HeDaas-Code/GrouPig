@@ -333,6 +333,7 @@ class TimelineBuilder:
         *,
         session_id: str = "",
         analyze: bool = True,
+        generate_strategy: bool = True,
         metrics: Mapping[str, Any] | None = None,
         **fields: Any,
     ) -> dict[str, Any]:
@@ -344,6 +345,12 @@ class TimelineBuilder:
 
         `analyze=True`（默认）时会继续走 `rpc:review.metrics` → `rpc:review.analyze`，
         把整条闭环跑完；拿不到下游处理器时退化为只出时间线（不会抛错）。
+
+        `generate_strategy=True`（默认）时把 `rpc:review.analyze` 的
+        `generate_strategy` 一起打开 —— 这是闭环的**收尾一步**：只有它开了，
+        `rpc:strategy.generate/validate/evaluate` 与 `rpc:presets.register` 才会被调到，
+        预设库才会在会话结束后变大。此前这里没传，`insights.analyze` 默认 `False`，
+        于是整条策略链在生产里零调用，「自适应」在结构上就是关着的。
         """
 
         self.completed += 1
@@ -375,7 +382,12 @@ class TimelineBuilder:
             review["metrics"] = measured
             if measured is not None:
                 review["insights"] = await self._call(
-                    "rpc:review.analyze", measured, session_id=sid, group_id=gid, timeline=built
+                    "rpc:review.analyze",
+                    measured,
+                    session_id=sid,
+                    group_id=gid,
+                    timeline=built,
+                    generate_strategy=bool(generate_strategy),
                 )
             review["analyzed"] = bool(measured is not None)
         if sid:

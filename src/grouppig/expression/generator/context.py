@@ -15,7 +15,7 @@
 **上下文拼装顺序**（:data:`BLOCK_ORDER`，稳定且可断言；见 docs/EXPRESSION.md）::
 
     人设（persona）→ 会话摘要（session）→ 聊天线（threads）→ 听众画像（profile）
-    → 当前消息（messages）→ 黑话（slang）→ 身份防御（identity）
+    → 关系分（relationship）→ 当前消息（messages）→ 黑话（slang）→ 身份防御（identity）
 
 每一块都是**可选**的：对应下游没挂时不抛异常，只把该块记进返回体的 ``missing`` 并继续——
 表达层是闭环的最后一环，不能因为某个上游缺席就整条链路断掉。
@@ -24,6 +24,7 @@
 
 * 会话摘要：``rpc:archive.load``（memory 域，按 ``session_id`` 取档案的标题/摘要/关键词）；
 * 听众画像：``rpc:profile.get``（social 域，取目标群友的标签/兴趣/说话风格）；
+* 关系分/分层：``rpc:relationship.get``（social 域，取 ``tier_label`` / ``score``）；
 * 近期消息：``rpc:chat.window``（memory 域，调用方没直接给 ``messages`` 时按群取窗）。
 
 预算闭环：先 ``rpc:token.reserve`` 拿本场景的输入/输出预算 → 用输入预算做压缩 →
@@ -72,7 +73,10 @@ for _name in (
 DEP_ARCHIVE_LOAD = "rpc:archive.load"
 DEP_PROFILE_GET = "rpc:profile.get"
 DEP_CHAT_WINDOW = "rpc:chat.window"
-for _name in (DEP_ARCHIVE_LOAD, DEP_PROFILE_GET, DEP_CHAT_WINDOW):
+#: 关系分/分层（social 域）。设计没给表达层这条边，但**没有它语气就没有亲密度维度**：
+#: 在接通之前，陌生人与死党拿到逐字相同的上下文，回复自然一模一样。
+DEP_RELATIONSHIP_GET = "rpc:relationship.get"
+for _name in (DEP_ARCHIVE_LOAD, DEP_PROFILE_GET, DEP_CHAT_WINDOW, DEP_RELATIONSHIP_GET):
     contract.assert_known_name(_name)
 
 #: 上下文块顺序（稳定输出；``compose`` 返回的 ``block_order`` 就是它）。
@@ -81,6 +85,7 @@ BLOCK_ORDER: tuple[str, ...] = (
     "session",
     "threads",
     "profile",
+    "relationship",
     "messages",
     "slang",
     "identity",
@@ -92,10 +97,26 @@ BLOCK_TITLES: dict[str, str] = {
     "session": "【这场会话】",
     "threads": "【在聊的线】",
     "profile": "【对方是谁】",
+    "relationship": "【和对方的关系】",
     "messages": "【最近的消息】",
     "slang": "【群里的梗】",
     "identity": "【身份纪律】",
 }
+
+#: 分层 → 语气提示（让 ``tier`` 真的能改变措辞，而不只是多一行数字）。
+#: 键取自 social 的 tier 值（``close`` / ``friend`` / ``acquaintance`` / ``stranger``）；
+#: 中文标签以 ``rpc:relationship.get`` 返回的 ``tier_label`` 为准，这里不重复维护译文。
+TIER_HINTS: dict[str, str] = {
+    "close": "可以随便开玩笑、叫外号、少客套",
+    "friend": "熟识，正常插科打诨就行",
+    "acquaintance": "普通群友，客气一点，别过度自来熟",
+    "stranger": "不熟，先别自来熟，客气克制",
+}
+
+#: 没有 affinity 边（``found=False``）= 陌生人：必须**显式说出来**。
+#: social 的分层默认档就是 ``stranger``，缺失不等于「没有信息」，而等于「关系还没建立」。
+STRANGER_BLOCK = "关系：陌生（还没怎么聊过）；先别自来熟，按普通群友来"
+
 
 #: 默认场景（token 预算策略键）。
 DEFAULT_SCENARIO = "chat"
@@ -200,6 +221,40 @@ def render_profile_block(profile: Mapping[str, Any] | None) -> str:
         temper = style.get("temper") or {}
         if isinstance(temper, Mapping) and temper.get("label"):
             parts.append(f"语气偏{temper.get('label')}")
+    return "；".join(parts)
+
+
+def render_relationship_block(relationship: Mapping[str, Any] | None) -> str:
+    """关系分/分层 → 上下文块（亲密度是语气的第一调节量）。
+
+    ``rpc:relationship.get`` 的返回形状（见 ``docs/SOCIAL.md`` 与
+    ``grouppig.social.graph.relationship.rules.RelationshipRules.get``）：
+
+    * 带 ``user_id``：``{found, score, tier, tier_label, interactions, last_ts, source}``；
+    * 不带 ``user_id``：整网统计 ``{count, average, max, min}`` —— 没有点名对象，
+      对「该怎么跟这个人说话」没有指导意义，**不出块**（免得模型对着平均分瞎猜）。
+
+    没有 affinity 边（``found=False``）时**不返回空串**：社交分层的默认档就是「陌生」，
+    「没有关系」本身就是一条要传达给模型的信息（否则陌生人与死党又回到同一个语气）。
+    """
+
+    if not isinstance(relationship, Mapping) or not relationship:
+        return ""
+    if relationship.get("user_id") is None and "count" in relationship:
+        return ""
+    score = relationship.get("score")
+    found = bool(relationship.get("found")) and score is not None
+    if not found:
+        return STRANGER_BLOCK
+    tier = str(relationship.get("tier") or "")
+    label = str(relationship.get("tier_label") or "") or tier
+    parts = [f"关系：{label}（{float(score):.0f} 分）"]
+    interactions = int(relationship.get("interactions") or 0)
+    if interactions:
+        parts.append(f"已互动 {interactions} 次")
+    hint = TIER_HINTS.get(tier)
+    if hint:
+        parts.append(hint)
     return "；".join(parts)
 
 
@@ -327,6 +382,7 @@ class ContextPacker:
         threads: Sequence[Mapping[str, Any]] | None = None,
         archive: Mapping[str, Any] | None = None,
         profile: Mapping[str, Any] | None = None,
+        relationship: Mapping[str, Any] | None = None,
         message: Mapping[str, Any] | None = None,
         scenario: str | None = None,
         keyword: str = "",
@@ -396,6 +452,21 @@ class ContextPacker:
         if not profile_block:
             missing.append("profile")
 
+        # 4.5) 关系分 / 亲密度（补数：rpc:relationship.get）
+        #      此前社交图是**只写不读**的（全仓只有 social 域内部读它），于是
+        #      「陌生人和死党」拿到逐字相同的上下文，语气自然一模一样。
+        #      把 tier_label + score 显式喂进 context_block，模型才有得可调。
+        if relationship is None and user_id:
+            loaded_relationship = await self._call(
+                DEP_RELATIONSHIP_GET,
+                int(user_id),
+                group_id=int(group_id or 0),
+            )
+            relationship = loaded_relationship if isinstance(loaded_relationship, Mapping) else None
+        relationship_block = render_relationship_block(relationship)
+        if not relationship_block:
+            missing.append("relationship")
+
         # 5) 当前消息（调用方没给就按群取窗口：补数 rpc:chat.window）
         rows = list(messages or ())
         if not rows and group_id:
@@ -463,6 +534,7 @@ class ContextPacker:
             "session": session_block,
             "threads": threads_block,
             "profile": profile_block,
+            "relationship": relationship_block,
             "messages": messages_block,
             "slang": slang_block,
             "identity": identity_block,
@@ -502,6 +574,7 @@ class ContextPacker:
             "block_order": list(BLOCK_ORDER),
             "persona_block": persona_block,
             "style_hints": style_hints,
+            "relationship": dict(relationship) if isinstance(relationship, Mapping) else {},
             "budget": budget,
             "tokens_before": tokens_before,
             "tokens_after": tokens_after,
@@ -558,6 +631,7 @@ def make_handlers(packer: ContextPacker) -> dict[str, Any]:
         threads: Sequence[Mapping[str, Any]] | None = None,
         archive: Mapping[str, Any] | None = None,
         profile: Mapping[str, Any] | None = None,
+        relationship: Mapping[str, Any] | None = None,
         message: Mapping[str, Any] | None = None,
         scenario: str | None = None,
         keyword: str = "",
@@ -579,6 +653,7 @@ def make_handlers(packer: ContextPacker) -> dict[str, Any]:
             threads=threads,
             archive=archive,
             profile=profile,
+            relationship=relationship,
             message=message,
             scenario=scenario,
             keyword=keyword,
@@ -617,6 +692,7 @@ __all__ = [
     "DEP_IDENTITY_DENY",
     "DEP_PERSONA_STYLE",
     "DEP_PROFILE_GET",
+    "DEP_RELATIONSHIP_GET",
     "DEP_SLANG_INJECT",
     "DEP_TOKEN_RESERVE",
     "DEP_WRITE",
@@ -624,6 +700,8 @@ __all__ = [
     "MODULE_ID",
     "NAMES",
     "RPC_COMPOSE",
+    "STRANGER_BLOCK",
+    "TIER_HINTS",
     "ContextPacker",
     "fallback_budget",
     "make_handlers",
@@ -632,6 +710,7 @@ __all__ = [
     "render_identity_block",
     "render_messages_block",
     "render_profile_block",
+    "render_relationship_block",
     "render_session_block",
     "render_slang_block",
     "render_threads_block",

@@ -20,6 +20,9 @@
     ② 调 ``rpc:sender.send_reply`` 发送（设计依赖）；③ 通过
     :mod:`grouppig.expression.orchestrator.flow.emitter` 发布
     ``kafka:grouppig.reply.composed``；④ 状态推到 ``done`` 并归档流程。
+    回复是**有序气泡列表**（``record.bubbles``）：多轮计划里每个「要出文本」的步骤
+    各是一条气泡，发送方按长度带间隔地分条发出，才像人在打字；
+    ``record.text`` 仍是最后一条（向后兼容老发送方）。
 
 **设计依赖的降级口径**（与 t8 一致：生成降级不阻断发送，且必须可观测）：
 
@@ -45,6 +48,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -183,6 +187,10 @@ class FlowRecord:
     plan: dict[str, Any] = field(default_factory=dict)
     selection: dict[str, Any] = field(default_factory=dict)
     text: str = ""
+    #: 有序气泡列表（多轮计划里每个「要出文本」的步骤各一条）。
+    #: ``text`` 仍是**最后一条**草稿（向后兼容：老的发送方/测试只读 ``text``）；
+    #: ``bubbles`` 才是完整的一条回复，供发送方分条、带间隔地发出去。
+    bubbles: list[str] = field(default_factory=list)
     candidates: list[str] = field(default_factory=list)
     composed: dict[str, Any] = field(default_factory=dict)
     replies: list[dict[str, Any]] = field(default_factory=list)
@@ -238,6 +246,8 @@ class FlowRecord:
             "plan": dict(self.plan),
             "selection": dict(self.selection),
             "text": self.text,
+            "bubbles": list(self.bubbles),
+            "bubble_count": len(self.bubbles),
             "candidates": list(self.candidates),
             "replies": [dict(item) for item in self.replies],
             "reply_count": len(self.replies),
@@ -267,6 +277,10 @@ class FlowStateStore:
     flows: dict[str, FlowRecord] = field(default_factory=dict, init=False)
     _active: dict[int, str] = field(default_factory=dict, init=False)
     _order: list[str] = field(default_factory=list, init=False)
+    #: 每条流程一把锁（``flow_id`` → 锁）。``end`` 的「生成 → 发送 → 发布」是临界区：
+    #: 幂等判断读的是 ``record.sent``，而它是 ``await self._send(...)`` **返回之后**才赋值的，
+    #: 没有锁时两个并发的 ``end`` 会双双通过 ``not record.sent.get("ok")``，把同一条回复发两次。
+    _locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
     starts: int = field(default=0, init=False)
     nexts: int = field(default=0, init=False)
     ends: int = field(default=0, init=False)
@@ -330,6 +344,25 @@ class FlowStateStore:
 
     def active_flows(self) -> list[dict[str, Any]]:
         return [record.as_dict() for record in self.flows.values() if not record.done]
+
+    def _lock_for(self, flow_id: str) -> asyncio.Lock:
+        """取该流程的单飞锁（第一次访问时建）。
+
+        锁表与流程表同寿：超过 ``MAX_ACTIVE * 2`` 时按插入顺序淘汰**未上锁**的锁，
+        避免长跑进程里锁表只增不减；已上锁的锁绝不淘汰（淘汰等于把单飞拆掉）。
+        """
+
+        key = str(flow_id or "")
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
+            while len(self._locks) > MAX_ACTIVE * 2:
+                stale = next((name for name, item in self._locks.items() if not item.locked()), None)
+                if stale is None:
+                    break
+                self._locks.pop(stale, None)
+        return lock
 
     # ---- 状态推进 ------------------------------------------------------
     async def _advance(self, record: FlowRecord, event: str) -> dict[str, Any]:
@@ -488,7 +521,13 @@ class FlowStateStore:
         text: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """``rpc:flow.end`` —— 结束编排并产出回复（生成 → 发送 → 发布事件）。"""
+        """``rpc:flow.end`` —— 结束编排并产出回复（生成 → 发送 → 发布事件）。
+
+        **单飞**：「生成 → 发送 → 发布 → 收尾」整段按 ``flow_id`` 串行（:meth:`_lock_for`）。
+        此前幂等判断读的 ``record.sent`` 是 ``await self._send(...)`` 返回后才赋值的，
+        两个并发的 ``end`` 会双双看到「还没发过」，同一条回复被发两次、事件也发两次
+        （集成层重试 / ``FlowDriver`` 重复触发都会命中）。
+        """
 
         self.ends += 1
         record = self.get(flow_id, group_id=group_id)
@@ -501,30 +540,33 @@ class FlowStateStore:
                 "sent": False,
                 "published": False,
             }
-        was_done = record.done
-        if text is not None and str(text).strip():
-            record.text = str(text)
-            if was_done:
-                # 显式给了新文本：允许重发（人工修正场景），重置「已发送」状态
-                record.sent = {}
-                record.published = {}
-        if not record.text:
-            await self._compose(record, **kwargs)
-        if user_id is not None:
-            record.user_id = int(user_id)
+        async with self._lock_for(record.flow_id):
+            was_done = record.done
+            if text is not None and str(text).strip():
+                record.text = str(text)
+                # 人工修正：气泡列表必须被这一条**替换**掉，不能把之前的草稿一起发出去。
+                record.bubbles = [str(text)]
+                if was_done:
+                    # 显式给了新文本：允许重发（人工修正场景），重置「已发送」状态
+                    record.sent = {}
+                    record.published = {}
+            if not record.text:
+                await self._compose(record, **kwargs)
+            if user_id is not None:
+                record.user_id = int(user_id)
 
-        # ① 发送（设计依赖 rpc:sender.send_reply）
-        #    **幂等**：已经发过且没给新文本时不再重发（集成层重复调 end 不会刷屏）
-        if send and not record.sent.get("ok"):
-            await self._send(record, **kwargs)
-        # ② 发布完成事件（设计依赖 kafka:grouppig.reply.composed）
-        if publish and not record.published.get("ok"):
-            await self._publish(record)
-        # ③ 收尾
-        if not record.done:
-            await self._advance(record, "finish")
-        record.ended_at = _now(self.ctx)
-        record.updated_at = record.ended_at
+            # ① 发送（设计依赖 rpc:sender.send_reply）
+            #    **幂等**：已经发过且没给新文本时不再重发（集成层重复调 end 不会刷屏）
+            if send and not record.sent.get("ok"):
+                await self._send(record, **kwargs)
+            # ② 发布完成事件（设计依赖 kafka:grouppig.reply.composed）
+            if publish and not record.published.get("ok"):
+                await self._publish(record)
+            # ③ 收尾
+            if not record.done:
+                await self._advance(record, "finish")
+            record.ended_at = _now(self.ctx)
+            record.updated_at = record.ended_at
         if record.degraded_paths:
             self.degraded += 1
         self._log(
@@ -580,6 +622,11 @@ class FlowStateStore:
         )
         if draft:
             record.text = draft
+            # 每一步的草稿都要留进气泡列表（此前只留最后一版，前面几版全被丢掉）。
+            # 与上一条**逐字相同**的草稿不重复入列：模型对每一步给出同一句话时，
+            # 连发两条一模一样不是「像人」，是 bug。
+            if not record.bubbles or record.bubbles[-1] != draft:
+                record.bubbles.append(draft)
             record.candidates = [str(item) for item in (composed.get("candidates") or ())]
         for path in composed.get("degraded_paths") or ():
             record.mark(str(path))
@@ -593,6 +640,9 @@ class FlowStateStore:
         payload: dict[str, Any] = {
             "group_id": record.group_id,
             "text": record.text,
+            # 多气泡：发送方（gateway composer）据此分条、按长度带间隔地发；
+            # ``text`` 保留最后一条，老发送方不看 ``bubbles`` 也能照常工作。
+            "bubbles": list(record.bubbles),
             "source": MODULE_ID,
         }
         if record.user_id is not None:
@@ -616,6 +666,7 @@ class FlowStateStore:
             "group_id": record.group_id,
             "user_id": record.user_id,
             "text": record.text,
+            "bubbles": list(record.bubbles),
             "candidates": list(record.candidates),
             "stage": self._publish_stage(record),
             "plan": dict(record.plan),

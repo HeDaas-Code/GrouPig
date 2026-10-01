@@ -156,3 +156,42 @@ async def test_rpc_handlers_registered_names_and_results():
     assert encoded["segment_count"] == 3
     assert encoded["text"] == "好呀"
     assert encoded["message"][0]["type"] == "reply"
+
+
+# ---- @全体成员 不等于 @机器人 --------------------------------------------
+def _at_all_event():
+    """一条 @全体成员 的群消息（OneBot 里是 at 段且 qq == "all"）。"""
+
+    return {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 100,
+        "user_id": 200,
+        "message_id": 9,
+        "self_id": SELF_ID,
+        "message": [{"type": "at", "data": {"qq": "all"}}, {"type": "text", "data": {"text": " 今晚停服维护"}}],
+        "sender": {"nickname": "管理"},
+    }
+
+
+def test_at_all_is_not_counted_as_mentioning_the_bot():
+    """@全体成员 此前被当成「叫了机器人」：最高优先级进队 + 拿满插话 mention 分量。
+
+    公告因此变成机器人的最高优先级唤醒源，而它本该只对「被点名」敏感。
+    """
+
+    event = event_codec.decode_event(_at_all_event())
+
+    assert event.at_all is True
+    assert event.mentions(SELF_ID) is False
+    assert event.at_self is False
+
+
+def test_real_mention_still_counts():
+    """真正的 @机器人 不受影响（回归护栏：别把修复做成「一律不认 @」）。"""
+
+    event = event_codec.decode_event(group_message("在吗", at_self=True, self_id=SELF_ID))
+
+    assert event.at_self is True
+    assert event.mentions(SELF_ID) is True
+    assert event.at_all is False

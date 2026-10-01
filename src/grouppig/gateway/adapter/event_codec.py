@@ -252,8 +252,24 @@ class QQEvent:
         return self.post_type == "notice" and self.notice_type in ("group_recall", "friend_recall")
 
     def mentions(self, user_id: int | str) -> bool:
+        """是否 @ 了指定用户。
+
+        ``@全体成员`` **不算**。它在 OneBot 里同样是 ``at`` 段，只是 ``qq == "all"``；
+        此前被一并当成「叫了机器人」，于是每条管理员公告都会：
+        * 被提升到 ``PRIORITY_MENTION`` 最高优先级进队（挤掉真实群聊消息）；
+        * 拿满插话分的 mention 分量，把机器人变成公告的应声虫。
+
+        需要区分全体成员时用 :attr:`at_all`。
+        """
+
         target = str(user_id)
-        return any(seg["type"] == "at" and str(seg["data"].get("qq", "")) in (target, "all") for seg in self.segments)
+        return any(seg["type"] == "at" and str(seg["data"].get("qq", "")) == target for seg in self.segments)
+
+    @property
+    def at_all(self) -> bool:
+        """是否 ``@全体成员``（与被点名区分开，供需要时使用）。"""
+
+        return any(seg["type"] == "at" and str(seg["data"].get("qq", "")) == "all" for seg in self.segments)
 
     # ---- 序列化 --------------------------------------------------------
     def as_dict(self) -> dict[str, Any]:

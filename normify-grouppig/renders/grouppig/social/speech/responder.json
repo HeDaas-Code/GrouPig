@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.social.speech.responder",
+  "updated_at": "2026-09-20T16:28:40.792Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "风格适配后做一致性校验。",
+    "en": "Style adaptation is followed by consistency validation."
+  },
+  "order": [
+    "grouppig.social.speech.responder.adapter",
+    "grouppig.social.speech.responder.validator"
+  ]
+}

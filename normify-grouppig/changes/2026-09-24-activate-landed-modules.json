@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "id": "2026-09-24-activate-landed-modules",
+  "title": {
+    "zh": "激活已落地模块：设计树与仓库对齐",
+    "en": "Activate landed modules: align design tree with repo"
+  },
+  "status": "verified",
+  "intent": {
+    "zh": "设计树有 32 个模块标 planned，但其中 19 个的源码已存在于约定路径（17 个叶子有 200–437 行实现并注册了契约名字，grouppig.perception 有装配入口与再导出，根 grouppig 有包元数据）。planned 与事实不符，会让设计树无法用于判断剩余工作量。本次仅把「源码确已落地」的 19 个转 active；另外 13 个容器的 __init__.py 是骨架占位（其 docstring 自述 state=planned，供 gen_skeleton --check 通过），保持 planned 不动。",
+    "en": "32 modules are marked planned, but 19 of them already have source at their conventional paths (17 leaves with 200-437 line implementations registering contract names, grouppig.perception with an assembly entry and re-exports, root grouppig with package metadata). planned contradicts the facts and makes the tree useless for judging remaining work. Only the 19 with landed source are activated; the other 13 containers are skeleton placeholders whose __init__.py self-declares state=planned (needed by gen_skeleton --check) and stay planned."
+  },
+  "modules": {
+    "modify": [
+      "grouppig.perception.behavior.classifier.aggregator",
+      "grouppig.perception.behavior.classifier.features",
+      "grouppig.perception.behavior.classifier.llm-judge",
+      "grouppig.perception.behavior.classifier.rule-engine",
+      "grouppig.perception.behavior.flood.repetition",
+      "grouppig.perception.behavior.flood.velocity",
+      "grouppig.perception.behavior.flood.verdict",
+      "grouppig.perception.behavior.rhythm.meter",
+      "grouppig.perception.behavior.rhythm.trend",
+      "grouppig.perception.interrupt.cooldown",
+      "grouppig.perception.interrupt.decision",
+      "grouppig.perception.interrupt.scorer",
+      "grouppig.perception.normalizer.cleaner",
+      "grouppig.perception.normalizer.dedup",
+      "grouppig.perception.normalizer.featurizer",
+      "grouppig.perception.observer.buffer",
+      "grouppig.perception.observer.window",
+      "grouppig",
+      "grouppig.perception"
+    ]
+  },
+  "acceptance": [
+    "19 个已落地模块（17 叶子 + grouppig + grouppig.perception）state 由 planned 转 active，fingerprint 不再是 pending",
+    "13 个占位容器（__init__.py docstring 自述 state=planned）保持 planned",
+    "每个被激活的叶子其 source 路径与 contract.module_to_path 一致",
+    "normify_validate 0 error，normify_build 与 normify_render 成功",
+    "docs/MODULE_MAP.md 与 tools/gen_skeleton.py 生成结果一致",
+    "全仓 pytest 全绿，runtime --check --no-connect 退出码 0"
+  ],
+  "note": "队长执行；只做事实对齐，不改任何模块的 name/description/apis/deps。\n19 个模块转 active（planned_count 32→13）；13 个占位容器保持 planned。validate 0 error / 28 warning；build+render ok；MODULE_MAP 已重生成；pytest 965 passed；runtime --check exit 0。",
+  "revision": {
+    "before": null,
+    "after": null
+  },
+  "created_at": "2026-09-24T06:49:42.609Z",
+  "updated_at": "2026-09-24T06:51:57.452Z",
+  "closed_at": "2026-09-24T06:51:57.452Z"
+}

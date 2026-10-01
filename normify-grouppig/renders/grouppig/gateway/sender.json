@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.gateway.sender",
+  "updated_at": "2026-09-20T16:28:39.834Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "回复包装器先节流再发送，撤回器独立补救。",
+    "en": "The composer throttles before sending; the retract module recovers independently."
+  },
+  "order": [
+    "grouppig.gateway.sender.composer",
+    "grouppig.gateway.sender.rate-limiter",
+    "grouppig.gateway.sender.retract"
+  ]
+}

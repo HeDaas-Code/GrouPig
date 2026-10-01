@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "id": "2026-09-24-laya-system1",
+  "title": {
+    "zh": "LAY A System-1 接入：轻量判定从 grok-4.6 迁到本地决策模型",
+    "en": "LAY A System-1 integration: move lightweight decisions off grok-4.6"
+  },
+  "status": "verified",
+  "intent": {
+    "zh": "实测 container.router.classify 走 a6api/grok-4.6 单次 51–60 秒（含 30s 超时重试），而同一任务在 LAY A 上 110–270ms、零输出 token。本变更把「判据能用一句话说清」的轻量结构化判定迁到本地 System-1 决策模型：新增传输层与 provider 分派，classify 默认走 LAY A 并保留 grok-4.6 作为降级；新增契约 rpc:model.system1 暴露 choice/score/noul 三原语与置信度，置信度低时自动升级对话模型。行为分类与打断决策**不迁移**（实测 2/6 与全判「不该说」，属统计特征与价值判断）。",
+    "en": "Measured: container.router.classify via a6api/grok-4.6 takes 51-60s per call (including a 30s timeout retry), while the same task on LAY A takes 110-270ms with zero output tokens. This change moves lightweight structured decisions (where the criterion fits in one sentence) to the local System-1 decision model: add a transport and provider dispatch, route classify to LAY A by default with grok-4.6 as fallback, and add rpc:model.system1 exposing the choice/score/noul primitives with confidence, escalating to the chat model when confidence is low. Behavior classification and interrupt decisions are deliberately NOT migrated."
+  },
+  "modules": {
+    "create": [
+      "grouppig.infra.runtime.laya-system1"
+    ],
+    "modify": [
+      "grouppig.infra.runtime.transport",
+      "grouppig.infra.model-gateway.router",
+      "grouppig.expression.identity.denial"
+    ],
+    "api_add": [
+      {
+        "module": "grouppig.infra.model-gateway.router",
+        "key": "rpc:model.system1"
+      }
+    ]
+  },
+  "acceptance": [
+    "classify 走 LAY A 后，rpc:model.classify 端到端延迟 < 1s（现状实测 51225ms / 60072ms）",
+    "LAY A 超时、401、422、503 时 rpc:model.classify 自动回落 grok-4.6 且不抛错",
+    "rpc:model.system1 登记进 api-index.json，contract.assert_known_name 通过，契约缺口为 0",
+    "choice / score / noul 三种原语各有用例；一次请求塞 6 个以上问题时只发一次 HTTP",
+    "置信度低于阈值时 system1 升级对话模型，响应标注实际来源（system1 或 escalated）",
+    "行为分类与打断决策保持原实现，不因本变更改变判定结果",
+    "全仓 pytest 全绿、ruff check/format 全清、normify_validate 0 error"
+  ],
+  "note": "密钥不入仓库：LAY A 的 key 走 dsh 凭据或环境变量，配置里只留 base_url 与 api_key_field。\nt23 独立验证 6/6 通过（一条带限定：51,225/60,072ms 基线无法离线重测，改用同路径同策略机制复现得 60,563.6ms / 91,528.8ms，偏差 0.8%）。交付 docs/LAY A.md（320 行）。全仓 959 passed / 0 failed，ruff 清，契约缺口 0。已知边界 8 条记于文档 §9。",
+  "revision": {
+    "before": null,
+    "after": null
+  },
+  "created_at": "2026-09-24T03:39:55.021Z",
+  "updated_at": "2026-09-24T05:47:43.687Z",
+  "closed_at": "2026-09-24T05:47:43.687Z"
+}

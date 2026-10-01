@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.expression.persona",
+  "updated_at": "2026-09-20T16:28:41.171Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "提示词构建器读取人设档案。",
+    "en": "The prompt builder reads the persona profile."
+  },
+  "order": [
+    "grouppig.expression.persona.prompt-builder",
+    "grouppig.expression.persona.profile"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.perception.behavior",
+  "updated_at": "2026-09-20T16:28:40.005Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "分类器综合刷屏与节奏信号。",
+    "en": "The classifier fuses flood and rhythm signals."
+  },
+  "order": [
+    "grouppig.perception.behavior.classifier",
+    "grouppig.perception.behavior.flood",
+    "grouppig.perception.behavior.rhythm"
+  ]
+}

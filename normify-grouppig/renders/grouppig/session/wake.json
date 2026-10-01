@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.session.wake",
+  "updated_at": "2026-09-20T16:28:40.522Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "恢复器把唤醒上下文写入缓冲。",
+    "en": "The restorer writes woken context into the buffer."
+  },
+  "order": [
+    "grouppig.session.wake.restorer",
+    "grouppig.session.wake.buffer"
+  ]
+}

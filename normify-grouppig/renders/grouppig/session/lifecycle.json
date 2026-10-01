@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.session.lifecycle",
+  "updated_at": "2026-09-20T16:28:40.365Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "状态机驱动热度、归档与事件发布。",
+    "en": "The state machine drives heat, archive and event emission."
+  },
+  "order": [
+    "grouppig.session.lifecycle.state-machine",
+    "grouppig.session.lifecycle.heat",
+    "grouppig.session.lifecycle.archive-trigger",
+    "grouppig.session.lifecycle.event-emitter"
+  ]
+}

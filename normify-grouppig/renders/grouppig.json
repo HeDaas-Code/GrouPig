@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "grouppig",
+  "updated_at": "2026-09-24T06:44:35.598Z",
+  "mode": "layers",
+  "max_columns": 4,
+  "reading": {
+    "zh": "从左到右：消息经接入与感知进入话题会话，表达层按反思预设与社交画像生成回复，并依赖记忆与基础设施；箭头表示依赖方向。panel 是横切的观测面板，读运行时快照，不参与消息流。",
+    "en": "Left to right: messages flow through gateway and perception into topic sessions; expression generates replies using reflection presets and social portraits, relying on memory and infrastructure. Arrows show dependency direction. panel is the cross-cutting observability front end reading runtime snapshots; it is not part of the message flow."
+  },
+  "order": [
+    "grouppig.gateway",
+    "grouppig.perception",
+    "grouppig.session",
+    "grouppig.expression",
+    "grouppig.reflection",
+    "grouppig.social",
+    "grouppig.memory",
+    "grouppig.infra",
+    "grouppig.panel"
+  ]
+}

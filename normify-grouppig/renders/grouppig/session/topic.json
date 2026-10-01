@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.session.topic",
+  "updated_at": "2026-09-20T16:28:40.249Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "检测器调用向量化器。",
+    "en": "The detector calls the embedder."
+  },
+  "order": [
+    "grouppig.session.topic.detector",
+    "grouppig.session.topic.embedder"
+  ]
+}

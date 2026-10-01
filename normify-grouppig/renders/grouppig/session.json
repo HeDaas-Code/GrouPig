@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.session",
+  "updated_at": "2026-09-22T18:14:37.188Z",
+  "mode": "layers",
+  "max_columns": 3,
+  "reading": {
+    "zh": "topic 先识别话题，lifecycle 管会话状态与归档，threads 编织聊天线，wake 负责跨会话唤醒；runtime 是装配入口。",
+    "en": "topic detects themes, lifecycle owns state and archiving, threads weave the chat line, wake restores archived sessions; runtime is the entry."
+  },
+  "order": [
+    "grouppig.session.runtime",
+    "grouppig.session.topic",
+    "grouppig.session.lifecycle",
+    "grouppig.session.threads",
+    "grouppig.session.wake"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.social.graph.manager",
+  "updated_at": "2026-09-20T16:28:40.868Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "自我中心网络→亲疏分层→事件发布。",
+    "en": "Ego-net, intimacy tiering, then event emission."
+  },
+  "order": [
+    "grouppig.social.graph.manager.egonet",
+    "grouppig.social.graph.manager.tiering",
+    "grouppig.social.graph.manager.events"
+  ]
+}

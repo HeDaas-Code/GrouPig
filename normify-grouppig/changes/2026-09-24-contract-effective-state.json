@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "2026-09-24-contract-effective-state",
+  "title": {
+    "zh": "contract.ModuleSpec.state 返回有效状态：未声明即 active（单点事实）",
+    "en": "contract.ModuleSpec.state returns the effective state: undeclared means active"
+  },
+  "status": "verified",
+  "intent": {
+    "zh": "contract._parse_frontmatter 用字面 unknown 表示「frontmatter 未声明 state」，而 normify 的语义是默认 active（state 是可选字段，只有计划态才显式写 planned）。后果是每个消费方都得自己翻译一次：gen_skeleton 里被迫写了 state_of（未声明/unknown → active），MODULE_MAP 的 state 列又兜一次，tree.json 里 185 个模块干脆没有 state 键。本次把「未声明 ⇒ active」收敛为 contract 的单点事实（新增 DEFAULT_STATE 常量，ModuleSpec.state 直接返回有效状态），并删掉 gen_skeleton 的重复翻译，让消费方直接读 spec.state；同时加测试锁死新语义并禁止第二处翻译复活。",
+    "en": "contract._parse_frontmatter used the literal unknown for a missing state, while normify's semantics are that state is optional and defaults to active (only planned modules declare it). Every consumer therefore had to translate it again: gen_skeleton grew a state_of helper, MODULE_MAP defaulted a second time, and 185 tree.json modules carry no state key at all. This change collapses undeclared-means-active into a single contract fact (new DEFAULT_STATE constant; ModuleSpec.state returns the effective state), removes gen_skeleton's duplicate translation so consumers read spec.state directly, and adds tests that lock the new semantics and forbid a second translation from reappearing."
+  },
+  "modules": {
+    "modify": [
+      "grouppig.infra.runtime.contract"
+    ]
+  },
+  "acceptance": [
+    "ModuleSpec.state 对未声明 state 的模块返回 active（不再是字面 unknown）",
+    "全仓不再有第二处「未声明 ⇒ active」的翻译：gen_skeleton.state_of / UNSET_STATE / DEFAULT_STATE 已删除，调用点直接读 spec.state",
+    "新增测试断言未声明 state 的模块 state == active，且非空转（未声明模块 >= 100；改回字面 unknown 时该测试确实失败）",
+    "MODULE_MAP 的 state 列行为不变：185 active / 13 planned / 0 unknown",
+    "normify_validate 0 error；normify_build 与 normify_render 成功",
+    "全仓 pytest 全绿；gen_skeleton --check 与 runtime --check --no-connect 退出 0；ruff check . 退出 0"
+  ],
+  "note": "队长 t35 指派（病灶由 t34 发现，用户已批准修）。\n「未声明 ⇒ active」收敛为 contract 的单点事实；gen_skeleton 的重复翻译已删除。指纹漂移按 validate 报出的模块名 refresh（grouppig.infra.runtime.contract）。",
+  "revision": {
+    "before": null,
+    "after": null
+  },
+  "created_at": "2026-09-24T10:51:52.720Z",
+  "updated_at": "2026-09-24T10:52:32.858Z",
+  "closed_at": "2026-09-24T10:52:32.858Z"
+}

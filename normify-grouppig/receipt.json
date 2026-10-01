@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "project": "normify-grouppig",
+  "compiled_at": "2026-09-29T19:07:39.859Z",
+  "stats": {
+    "tree_count": 1,
+    "module_count": 202,
+    "leaf_count": 140,
+    "api_count": 167,
+    "dep_count": 158,
+    "cross_tree_dep_count": 0,
+    "max_depth": 5,
+    "layout_count": 62,
+    "planned_count": 14,
+    "deprecated_count": 0,
+    "policy_rule_count": 2,
+    "change_count": 13,
+    "open_change_count": 0
+  },
+  "warnings": {
+    "api/leaf-empty": 31,
+    "layout/order-incomplete": 1
+  },
+  "artifacts": {
+    "tree.json": {
+      "sha256": "5533e735065fb96ceb939f2cc40f8d51f4f6de7100be714e0130f7a887deb224",
+      "bytes": 408778
+    },
+    "outline.md": {
+      "sha256": "26eff06b938d68f0604a67ff3d67880591f9aa4d5f6fb5a98403ecf4ed17acb4",
+      "bytes": 39430
+    },
+    "api-index.json": {
+      "sha256": "d087c75d7de3919d42d8a097ffe95899046bc6e035640eec42edd115c9589432",
+      "bytes": 11191
+    },
+    "receipt.json": {
+      "sha256": "339bfa321b997a5975ef7410a2b2dd36d543ef30c38718ce477863ac1b802967",
+      "bytes": 956
+    }
+  }
+}

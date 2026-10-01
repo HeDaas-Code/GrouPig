@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.social",
+  "updated_at": "2026-09-22T18:06:07.752Z",
+  "mode": "layers",
+  "max_columns": 3,
+  "reading": {
+    "zh": "先档案（profile）建立事实，再说话画像（speech）刻画风格，最后社交网（graph）算 0-99 关系分；runtime 是装配入口。",
+    "en": "Profiles first, then speech traits, then the social graph with 0-99 relationship scores; runtime is the assembly entry."
+  },
+  "order": [
+    "grouppig.social.runtime",
+    "grouppig.social.profile",
+    "grouppig.social.speech",
+    "grouppig.social.graph"
+  ]
+}

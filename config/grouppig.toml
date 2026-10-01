@@ -1,0 +1,131 @@
+# GrouPig 开发期配置（SQLite + 本机 NapCat）
+# 生产/私有覆盖请另建 config/grouppig.local.toml（已 gitignore），或用 GROUPPIG__A__B 环境变量覆盖。
+# 密钥绝不写在本文件：走 GROUPPIG_MODEL_API_KEY 环境变量或 ~/.dsh/.credentials.yaml。
+
+[app]
+name = "grouppig"
+env = "dev"
+
+[logging]
+level = "INFO"
+json = true
+file = ""
+
+[storage]
+# sqlite（开发） | mysql（生产）。dsn 前缀必须与 driver 一致。
+driver = "sqlite"
+dsn = "sqlite+aiosqlite:///./var/grouppig.db"
+
+[onebot]
+# NapCat 的 OneBot v11 正向 WebSocket 地址
+ws_url = "ws://127.0.0.1:3001"
+access_token = ""
+self_id = 0
+reconnect_interval = 3.0
+heartbeat_interval = 30.0
+
+[perception.interrupt]
+# 无 @ 时把不可用的 mentioned 权重归一给其余有效分量。
+renormalize = true
+# A3 跨群实测：0.26 是四群都能开口且未退化成每轮开口的最高稳定点。
+threshold = 0.26
+
+[model]
+default_provider = "a6api"
+
+[model.providers.a6api]
+# 按实际服务商填写，例如 "https://<host>/v1"；留空时 http transport 启动会告警。
+base_url = "https://api.a6api.com/v1"
+api_key_env = "GROUPPIG_MODEL_API_KEY"
+api_key_field = "model.api_key"
+
+[model.providers.local]
+# 本地确定性嵌入：无网络、无密钥、无额外依赖（见 src/grouppig/infra/runtime/local_embed.py）
+base_url = "local"
+
+[model.providers.laya]
+# LAY A System-1 决策模型：非 OpenAI 兼容，唯一端点 POST {base_url}/v1/systemone。
+# 密钥不入仓库，解析顺序：GROUPPIG_LAYA_API_KEY → GROUPPIG_MODEL_API_KEY
+# → 凭据 model.api_key / refs.model.api_key（详见 infra/runtime/transport.resolve_api_key）。
+# 本机部署：服务实测只监听 127.0.0.1:7780，所以这里填回环地址（填局域网 IP 会连不上）。
+# 代价：tests/test_laya_e2e.py 的离线保证退化为「改写前后逐字相等」，由
+# test_repo_config_endpoints_are_the_declared_ones 守住「常量与配置一致」来兜底。
+base_url = "http://127.0.0.1:7780"
+api_key_env = "GROUPPIG_LAYA_API_KEY"
+api_key_field = "model.api_key"
+
+[model.providers.deepseek]
+base_url = ""
+api_key_env = "DEEPSEEK_API_KEY"
+api_key_field = "model.api_key"
+
+[model.tasks.chat]
+provider = "a6api"
+model = "grok-4.6"
+temperature = 0.8
+max_tokens = 512
+fallback_models = ["deepseek-v4-flash"]
+
+[model.tasks.classify]
+# 默认走 LAY A System-1（model 是协议枚举，不是服务商模型名）；grok-4.6 保留为降级目标。
+provider = "laya"
+model = "auto"
+temperature = 0.0
+max_tokens = 64
+fallback_models = ["grok-4.6"]
+
+[model.tasks.embed]
+provider = "local"
+model = "local-ngram-64"
+temperature = 0.0
+max_tokens = 0
+fallback_models = []
+
+[model.retry]
+max_attempts = 3
+base_delay = 0.5
+max_delay = 8.0
+multiplier = 2.0
+jitter = 0.1
+timeout = 30.0
+
+[token]
+# 每日 token 上限（0 表示不限）
+daily_limit = 0
+default_scenario = "chat"
+
+# 预算策略：闲聊低配、讨论高配（对应设计 grouppig.infra.token-budget.policy）
+[token.policies.smalltalk]
+max_input_tokens = 800
+max_output_tokens = 120
+on_exceed = "clamp"
+
+[token.policies.chat]
+max_input_tokens = 1600
+max_output_tokens = 320
+on_exceed = "clamp"
+
+[token.policies.discussion]
+max_input_tokens = 4000
+max_output_tokens = 800
+on_exceed = "clamp"
+
+[token.policies.reflection]
+max_input_tokens = 8000
+max_output_tokens = 1500
+on_exceed = "clamp"
+
+[token.policies.classify]
+max_input_tokens = 2000
+max_output_tokens = 64
+on_exceed = "clamp"
+
+[token.policies.embed]
+max_input_tokens = 4000
+max_output_tokens = 0
+on_exceed = "clamp"
+
+[bus]
+# 主题名只允许出现在 normify-grouppig/api-index.json 的 kafka: 集合中
+strict_topics = true
+handler_timeout = 5.0

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.perception.interrupt",
+  "updated_at": "2026-09-20T16:28:40.173Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "评分器查冷却后给出插话决策。",
+    "en": "The scorer checks cooldown then produces an interrupt decision."
+  },
+  "order": [
+    "grouppig.perception.interrupt.scorer",
+    "grouppig.perception.interrupt.cooldown",
+    "grouppig.perception.interrupt.decision"
+  ]
+}

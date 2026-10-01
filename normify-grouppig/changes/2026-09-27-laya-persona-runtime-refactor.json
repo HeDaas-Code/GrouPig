@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "2026-09-27-laya-persona-runtime-refactor",
+  "title": {
+    "zh": "LAY A 决策引擎与拟人化运行时重构",
+    "en": "Refactor LAY A decision engine and persona runtime"
+  },
+  "status": "verified",
+  "intent": {
+    "zh": "把 LAY A 从单一分类模型提升为低延迟结构化裁决层，并补齐人格、关系、记忆、缓存幂等与 shadow 评估边界。",
+    "en": "Elevate LAY A from a classifier into a low-latency structured arbitration layer, while defining persona, relationship, memory, idempotency, caching, and shadow-evaluation boundaries."
+  },
+  "modules": {
+    "modify": [
+      "grouppig.infra.runtime.laya-system1",
+      "grouppig.infra.model-gateway.router",
+      "grouppig.perception.interrupt.scorer",
+      "grouppig.perception.interrupt.decision",
+      "grouppig.perception.behavior.classifier.aggregator"
+    ],
+    "create": [
+      "grouppig.perception.runtime.persona",
+      "grouppig.perception.runtime.decision-packet",
+      "grouppig.perception.runtime.decision-cache"
+    ]
+  },
+  "acceptance": [
+    "LAY A 的批量结构化决策契约明确，包含 context、persona、relationship、local_gates、laya 和 final 边界",
+    "本地硬门始终优先于 LAY A 建议，模型不可绕过 cooldown、flood、rate limit、敏感风险和发送幂等",
+    "提供 off、shadow、active 三种运行模式，shadow 不改变真实动作并记录分歧、置信度和延迟",
+    "人格、关系和记忆状态与快速决策解耦，决策只读取压缩快照，不直接改写长期记忆",
+    "窗口 fingerprint、TTL 缓存和 flow 幂等键设计完成并有回归测试",
+    "全量测试通过，Normify validate 0 errors"
+  ],
+  "note": "团队规划阶段：四个独立设计任务已登记。当前只建立 planned 结构与验收边界，不进入源码实现；已知硬边界：LAY A 不接管 behavior/interrupt score，不绕过本地硬门；纯数值 state 已被真实实验否定，必须保留自然语言语境并 shadow 对照。\nImplemented auditable decision packet, immutable persona/runtime snapshots, TTL/LRU and single-flight cache primitives, and wired off/shadow/active behavior classification modes. Fake OneBot replays and full regression completed; real API skipped because no credentials are configured.",
+  "revision": {
+    "before": null,
+    "after": null
+  },
+  "created_at": "2026-09-29T16:58:42.767Z",
+  "updated_at": "2026-09-29T19:07:39.760Z",
+  "closed_at": "2026-09-29T19:07:39.760Z"
+}

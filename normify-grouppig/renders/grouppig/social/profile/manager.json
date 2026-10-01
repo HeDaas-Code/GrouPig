@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.social.profile.manager",
+  "updated_at": "2026-09-20T16:28:40.675Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "版本化更新依赖查询，并发布变更事件。",
+    "en": "Versioned updates depend on lookup and publish change events."
+  },
+  "order": [
+    "grouppig.social.profile.manager.lookup",
+    "grouppig.social.profile.manager.versioning",
+    "grouppig.social.profile.manager.events"
+  ]
+}

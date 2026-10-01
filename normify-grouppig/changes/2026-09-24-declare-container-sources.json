@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "id": "2026-09-24-declare-container-sources",
+  "title": {
+    "zh": "为 active 容器声明 source：消除 42 个恒为 pending 的指纹",
+    "en": "Declare source on active containers: remove 42 permanently-pending fingerprints"
+  },
+  "status": "verified",
+  "intent": {
+    "zh": "42 个 active 容器没有声明 source，fingerprint 恒为 pending，而 pending 的语义是「代码未落地」——对已实现的容器是假话。容器自身就是包，其代码位置即约定路径上的 __init__.py，因此为这 42 个补上 source 并重算指纹。13 个 planned 容器保持 pending（语义正确：确实未实现）。注意：其中 33 个 __init__.py 由 tools/gen_skeleton.py 维护（仅 state 一行可变），因此当容器 state 变化时该文件内容会变、指纹会漂移——这落在既有的收尾铁律里（改源码后必须 normify_module_refresh），且 validate 会精确报出漂移模块名。",
+    "en": "42 active containers declare no source, so their fingerprint stays pending — and pending means 'code not landed', which is false for implemented containers. A container is a package, so its code location is the __init__.py at its conventional path; declare it for these 42 and recompute fingerprints. The 13 planned containers stay pending (correctly: not implemented). Note: 33 of those __init__.py files are maintained by tools/gen_skeleton.py (only the state token varies), so a container state change alters the file and drifts the fingerprint — this lands inside the existing closeout rule (refresh after source changes), and validate names the drifted modules exactly."
+  },
+  "modules": {
+    "modify": [
+      "grouppig.expression",
+      "grouppig.expression.generator",
+      "grouppig.expression.persona",
+      "grouppig.gateway",
+      "grouppig.gateway.adapter",
+      "grouppig.gateway.router",
+      "grouppig.gateway.sender",
+      "grouppig.infra",
+      "grouppig.infra.config",
+      "grouppig.infra.model-gateway",
+      "grouppig.infra.token-budget",
+      "grouppig.memory",
+      "grouppig.memory.chat-store",
+      "grouppig.memory.profile-store",
+      "grouppig.memory.session-archive",
+      "grouppig.memory.slang-kb",
+      "grouppig.memory.social-store",
+      "grouppig.memory.thread-store",
+      "grouppig.reflection",
+      "grouppig.reflection.evaluator",
+      "grouppig.reflection.presets",
+      "grouppig.reflection.session-review",
+      "grouppig.reflection.strategy",
+      "grouppig.session",
+      "grouppig.session.lifecycle",
+      "grouppig.session.threads",
+      "grouppig.session.threads.cross",
+      "grouppig.session.threads.weaver",
+      "grouppig.session.topic",
+      "grouppig.session.topic.detector",
+      "grouppig.session.topic.embedder",
+      "grouppig.session.wake",
+      "grouppig.social",
+      "grouppig.social.graph",
+      "grouppig.social.graph.manager",
+      "grouppig.social.graph.relationship",
+      "grouppig.social.profile",
+      "grouppig.social.profile.extractor",
+      "grouppig.social.profile.manager",
+      "grouppig.social.speech",
+      "grouppig.social.speech.profiler",
+      "grouppig.social.speech.responder"
+    ]
+  },
+  "acceptance": [
+    "42 个 active 容器全部声明 source，路径等于 contract.module_to_path 的约定路径，且文件存在",
+    "42 个模块的 fingerprint 不再是 pending（13 个 planned 容器保持 pending）",
+    "normify_validate 0 error / 28 warning",
+    "normify_build 与 normify_render 成功",
+    "docs/MODULE_MAP.md 与 tools/gen_skeleton.py 生成结果一致",
+    "全仓 pytest 全绿；gen_skeleton --check 与 runtime --check --no-connect 退出 0"
+  ],
+  "note": "队长执行。只加 source，不改任何模块的 name/description/apis/deps/state。\n42 个 active 容器补 source + 指纹（L1 要求 source 与 fingerprint 同批写，故先 normify_fingerprint 再 batch patch）。结果：容器 61 = 48 有 source + 13 planned 无 source；pending 仅剩 13 个 planned 容器；active 且 pending = 0。validate 0 error / 28 warning；build+render ok；pytest 972；ruff 全清；gen_skeleton --check 与 runtime --check 退出 0。",
+  "revision": {
+    "before": null,
+    "after": null
+  },
+  "created_at": "2026-09-24T10:40:36.956Z",
+  "updated_at": "2026-09-24T10:42:36.479Z",
+  "closed_at": "2026-09-24T10:42:36.479Z"
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.perception.normalizer",
+  "updated_at": "2026-09-20T16:28:39.958Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "清洗后去重并提取特征。",
+    "en": "Clean, then dedup and extract features."
+  },
+  "order": [
+    "grouppig.perception.normalizer.cleaner",
+    "grouppig.perception.normalizer.dedup",
+    "grouppig.perception.normalizer.featurizer"
+  ]
+}

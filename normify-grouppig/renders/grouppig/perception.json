@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.perception",
+  "updated_at": "2026-09-20T16:28:39.876Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "观察→清洗→行为识别→插话决策。",
+    "en": "Observe, clean, recognize behavior, then decide to interrupt."
+  },
+  "order": [
+    "grouppig.perception.observer",
+    "grouppig.perception.normalizer",
+    "grouppig.perception.behavior",
+    "grouppig.perception.interrupt"
+  ]
+}

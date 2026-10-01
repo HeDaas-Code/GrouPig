@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.expression.orchestrator.flow",
+  "updated_at": "2026-09-20T16:28:41.279Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "状态存储驱动转移表并发布事件。",
+    "en": "State store drives the transition table and emits events."
+  },
+  "order": [
+    "grouppig.expression.orchestrator.flow.state",
+    "grouppig.expression.orchestrator.flow.transition",
+    "grouppig.expression.orchestrator.flow.emitter"
+  ]
+}

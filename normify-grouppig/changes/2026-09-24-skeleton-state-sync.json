@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "2026-09-24-skeleton-state-sync",
+  "title": {
+    "zh": "骨架生成器刷新容器 __init__.py 的 state 并锁死一致性",
+    "en": "Skeleton generator refreshes container __init__.py state and locks consistency"
+  },
+  "status": "verified",
+  "intent": {
+    "zh": "工具链改动，无对应设计模块：本次只改仓库脚手架与测试（tools/gen_skeleton.py、tests/test_skeleton.py、docs/MODULE_MAP.md），以及生成器产出的 33 个容器包 __init__.py 的 state= 字样——这些容器包的 __init__.py 未被设计树登记为 source，改动不涉及任何模块的契约或指纹。背景：PACKAGE_INIT 模板把设计树 state 写进容器 docstring，但 state 会随模块落地从 planned 变 active，而生成器此前只写不存在的文件、--check 也只校验存在性，于是 33 个容器包冻结在生成时刻的 state=planned。本次让生成器对「整文件与模板结构同构」的 __init__.py 原地刷新 state（手写装配入口一律不碰），--check 同时校验内容，并补测试锁死「模板产物 state == 设计树 state」。",
+    "en": "Toolchain-only change with no corresponding design module: it touches the repo scaffolding and tests (tools/gen_skeleton.py, tests/test_skeleton.py, docs/MODULE_MAP.md) plus the state= line of 33 generated container __init__.py files, none of which the design tree records as a source, so no module contract or fingerprint is affected. The PACKAGE_INIT template stamps the design-tree state into container docstrings; state flips from planned to active as modules land, but the generator only created missing files and --check only verified existence, leaving 33 container packages frozen at state=planned. The generator now refreshes state in place for __init__.py files that are structurally identical to the template (handwritten entry points are never touched), --check also validates content, and tests lock template-produced state == design-tree state."
+  },
+  "modules": {},
+  "acceptance": [
+    "生成器只刷新「与 PACKAGE_INIT 模板结构同构」的容器 __init__.py；手写装配入口（src/grouppig/perception/__init__.py 等 6 个回归样本）字节不变",
+    "刷新幂等：内容已正确时不写盘（mtime 不变）",
+    "新增测试断言模板同构的容器 __init__.py 其 state= 同时等于 frontmatter 的有效 state 与 tree.json 的 state；人为改坏（grouppig.memory → state=planned）时该测试确实失败",
+    "33 处陈旧 state= 全部修正，13 个真 planned 容器保持 state=planned 不变",
+    "docs/MODULE_MAP.md 与生成器输出一致（重跑生成器不改动文件）",
+    "全仓 pytest 全绿；python -m grouppig.runtime --check --no-connect 退出码 0；python tools/gen_skeleton.py --check 退出码 0"
+  ],
+  "note": "队长 t34 指派。判据用结构同构（PACKAGE_INIT 渲染 + 逐字比较），不用「包含 state=planned 字样」的弱判据。\n工具链改动：生成器刷新 33 个模板产物的 state，手写 __init__.py 逐字不变；无模块契约/指纹变化（这些 __init__.py 未被设计树登记为 source）。",
+  "revision": {
+    "before": null,
+    "after": null
+  },
+  "created_at": "2026-09-24T07:04:02.904Z",
+  "updated_at": "2026-09-24T07:04:27.393Z",
+  "closed_at": "2026-09-24T07:04:27.393Z"
+}

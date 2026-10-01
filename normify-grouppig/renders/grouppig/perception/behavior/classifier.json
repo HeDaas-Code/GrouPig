@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.perception.behavior.classifier",
+  "updated_at": "2026-09-20T16:28:40.051Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "聚合器融合特征、规则与模型结果。",
+    "en": "The aggregator fuses features, rules and model outputs."
+  },
+  "order": [
+    "grouppig.perception.behavior.classifier.aggregator",
+    "grouppig.perception.behavior.classifier.features",
+    "grouppig.perception.behavior.classifier.rule-engine",
+    "grouppig.perception.behavior.classifier.llm-judge"
+  ]
+}

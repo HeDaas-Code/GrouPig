@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.session.threads.weaver",
+  "updated_at": "2026-09-20T16:28:40.444Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "分段→链接→大纲。",
+    "en": "Segment, link, then outline."
+  },
+  "order": [
+    "grouppig.session.threads.weaver.segmenter",
+    "grouppig.session.threads.weaver.linker",
+    "grouppig.session.threads.weaver.outliner"
+  ]
+}

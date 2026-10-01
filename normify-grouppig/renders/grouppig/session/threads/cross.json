@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.session.threads.cross",
+  "updated_at": "2026-09-20T16:28:40.484Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "引用解析后匹配历史聊天线。",
+    "en": "Parse references, then match historical threads."
+  },
+  "order": [
+    "grouppig.session.threads.cross.reference-parser",
+    "grouppig.session.threads.cross.matcher"
+  ]
+}

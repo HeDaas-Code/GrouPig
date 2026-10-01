@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.memory.runtime",
+  "updated_at": "2026-09-22T17:18:36.799Z",
+  "mode": "grid",
+  "max_columns": 4,
+  "reading": {
+    "zh": "先注册表结构（meta/columns/schema），再连接与迁移（db/migrate），检索与门面（similarity/stores），最后 di 装配。",
+    "en": "Table metadata first (meta/columns/schema), then connections and migration (db/migrate), retrieval and facade (similarity/stores), assembled by di."
+  },
+  "order": [
+    "grouppig.memory.runtime.meta",
+    "grouppig.memory.runtime.columns",
+    "grouppig.memory.runtime.schema",
+    "grouppig.memory.runtime.db",
+    "grouppig.memory.runtime.migrate",
+    "grouppig.memory.runtime.rows",
+    "grouppig.memory.runtime.similarity",
+    "grouppig.memory.runtime.stores",
+    "grouppig.memory.runtime.di",
+    "grouppig.memory.runtime.errors"
+  ]
+}

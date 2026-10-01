@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.expression",
+  "updated_at": "2026-09-23T01:55:45.639Z",
+  "mode": "layers",
+  "max_columns": 3,
+  "reading": {
+    "zh": "persona 定人设与提示词，generator 负责上下文拼装、写稿、去 AI 味与压缩；runtime 是装配入口。orchestrator/identity/slang 由 t9 落地。",
+    "en": "persona owns identity and prompts; generator composes context, writes, humanizes and compresses; runtime is the assembly entry. orchestrator/identity/slang land in t9."
+  },
+  "order": [
+    "grouppig.expression.runtime",
+    "grouppig.expression.persona",
+    "grouppig.expression.generator",
+    "grouppig.expression.orchestrator",
+    "grouppig.expression.identity",
+    "grouppig.expression.slang"
+  ]
+}

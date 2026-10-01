@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.panel",
+  "updated_at": "2026-09-24T06:44:35.396Z",
+  "mode": "layers",
+  "max_columns": 3,
+  "reading": {
+    "zh": "快照层是唯一的数据来源（进程内读取运行时装配结果），Web 与 TUI 是它的两个前端；改观测口径只改 snapshot。",
+    "en": "The snapshot layer is the single data source (reading the assembled runtime in-process); Web and TUI are its two frontends, so observability changes belong in snapshot."
+  },
+  "order": [
+    "grouppig.panel.snapshot",
+    "grouppig.panel.web",
+    "grouppig.panel.tui"
+  ]
+}

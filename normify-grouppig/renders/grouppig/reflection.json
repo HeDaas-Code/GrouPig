@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.reflection",
+  "updated_at": "2026-09-22T18:14:37.319Z",
+  "mode": "layers",
+  "max_columns": 3,
+  "reading": {
+    "zh": "presets 提供行为预设，strategy 生成与校验新策略，evaluator 打分，session-review 会话结束后复盘。",
+    "en": "presets supply behaviors, strategy synthesizes and validates new ones, evaluator scores, session-review reflects after a session."
+  },
+  "order": [
+    "grouppig.reflection.runtime",
+    "grouppig.reflection.presets",
+    "grouppig.reflection.strategy",
+    "grouppig.reflection.evaluator",
+    "grouppig.reflection.session-review"
+  ]
+}

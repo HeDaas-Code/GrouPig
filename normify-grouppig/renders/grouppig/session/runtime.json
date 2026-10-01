@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.session.runtime",
+  "updated_at": "2026-09-24T06:44:35.498Z",
+  "mode": "grid",
+  "max_columns": 3,
+  "reading": {
+    "zh": "messages 是消息视图工具（取文本/时间戳/发送者），di 是会话层装配入口并注册契约名字，errors 是共享异常；先看工具与异常，再看 di 的接线。",
+    "en": "messages holds message-view helpers (text/timestamp/sender), di is the session-layer assembly entry that registers contract names, errors holds shared exceptions; read the helpers and errors first, then di's wiring."
+  },
+  "order": [
+    "grouppig.session.runtime.messages",
+    "grouppig.session.runtime.errors",
+    "grouppig.session.runtime.di"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.reflection.session-review",
+  "updated_at": "2026-09-20T16:28:41.021Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "时间线→指标→结论。",
+    "en": "Timeline, metrics, then insights."
+  },
+  "order": [
+    "grouppig.reflection.session-review.timeline",
+    "grouppig.reflection.session-review.metrics",
+    "grouppig.reflection.session-review.insights"
+  ]
+}

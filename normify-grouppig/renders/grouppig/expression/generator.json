@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.expression.generator",
+  "updated_at": "2026-09-20T16:28:41.390Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "上下文打包→压缩→生成→润色。",
+    "en": "Context packing, compression, generation, then polishing."
+  },
+  "order": [
+    "grouppig.expression.generator.context",
+    "grouppig.expression.generator.compressor",
+    "grouppig.expression.generator.writer",
+    "grouppig.expression.generator.polisher"
+  ]
+}

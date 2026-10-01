@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.social.profile",
+  "updated_at": "2026-09-20T16:28:40.600Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "抽取器写入档案管理器。",
+    "en": "The extractor writes through the profile manager."
+  },
+  "order": [
+    "grouppig.social.profile.extractor",
+    "grouppig.social.profile.manager"
+  ]
+}

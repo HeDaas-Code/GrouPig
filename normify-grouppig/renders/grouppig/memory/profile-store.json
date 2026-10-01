@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.memory.profile-store",
+  "updated_at": "2026-09-20T16:28:41.574Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "表结构与 DAO。",
+    "en": "Schema and DAO."
+  },
+  "order": [
+    "grouppig.memory.profile-store.schema",
+    "grouppig.memory.profile-store.dao"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.social.graph",
+  "updated_at": "2026-09-20T16:28:40.830Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "关系分管理器更新社交网分层。",
+    "en": "The relationship manager updates social graph tiers."
+  },
+  "order": [
+    "grouppig.social.graph.manager",
+    "grouppig.social.graph.relationship"
+  ]
+}

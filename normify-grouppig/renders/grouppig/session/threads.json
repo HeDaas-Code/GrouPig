@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.session.threads",
+  "updated_at": "2026-09-20T16:28:40.404Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "编织器调用跨会话引用识别。",
+    "en": "The weaver calls cross-session reference detection."
+  },
+  "order": [
+    "grouppig.session.threads.weaver",
+    "grouppig.session.threads.cross"
+  ]
+}

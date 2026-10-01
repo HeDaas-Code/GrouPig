@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.perception.runtime",
+  "updated_at": "2026-09-29T17:16:44.406Z",
+  "mode": "layers",
+  "max_columns": 3,
+  "reading": {
+    "zh": "规划层：人格关系快照提供只读上下文，决策包统一协议，缓存幂等治理快速执行；依赖边待实现模块落地后补齐。",
+    "en": "Planning layer: persona and relationship snapshots provide read-only context, the decision packet unifies the protocol, and cache/idempotency govern fast execution; dependency hints will be added after implementation modules land."
+  },
+  "order": [
+    "grouppig.perception.runtime.persona",
+    "grouppig.perception.runtime.decision-packet",
+    "grouppig.perception.runtime.decision-cache"
+  ]
+}

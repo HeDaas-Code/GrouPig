@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.social.graph.relationship",
+  "updated_at": "2026-09-20T16:28:40.906Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "关系分规则含时间衰减。",
+    "en": "Relationship rules include time decay."
+  },
+  "order": [
+    "grouppig.social.graph.relationship.rules",
+    "grouppig.social.graph.relationship.decay"
+  ]
+}

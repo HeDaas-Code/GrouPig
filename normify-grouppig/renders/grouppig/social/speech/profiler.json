@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.social.speech.profiler",
+  "updated_at": "2026-09-20T16:28:40.752Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "风格指标综合口头禅与语气温度。",
+    "en": "Style metrics combine lexicon and temper."
+  },
+  "order": [
+    "grouppig.social.speech.profiler.style-metrics",
+    "grouppig.social.speech.profiler.lexicon",
+    "grouppig.social.speech.profiler.temper"
+  ]
+}

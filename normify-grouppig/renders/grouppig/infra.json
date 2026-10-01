@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.infra",
+  "updated_at": "2026-09-22T16:46:42.758Z",
+  "mode": "layers",
+  "max_columns": 3,
+  "reading": {
+    "zh": "模型网关读配置；token 预算与日志提供横切保障；runtime 是各域自注册的进程内基座。",
+    "en": "The model gateway reads config; token budget and logging are cross-cutting; runtime is the in-process substrate domains self-register into."
+  },
+  "order": [
+    "grouppig.infra.runtime",
+    "grouppig.infra.model-gateway",
+    "grouppig.infra.config",
+    "grouppig.infra.token-budget",
+    "grouppig.infra.logger"
+  ]
+}

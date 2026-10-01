@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "2026-09-26-fix-cooldown-absolute-veto",
+  "title": {
+    "zh": "修复冷却绝对否决与退避棘轮",
+    "en": "Fix cooldown absolute veto and backoff ratchet"
+  },
+  "status": "verified",
+  "intent": {
+    "zh": "实测证据：插话分 0.9（远超阈值 0.55）仍被拦成 hold/cooldown；14 次判定中 12 次 reason=cooldown。三处缺陷：① 任何非 speak 都记一次退避拒绝，含被闸门拦下的情形，形成自我毒化；② 拒绝计数无上限、无过期，且每次拒绝刷新计时起点，退避永不解除（棘轮）；③ allowed=False 时强制 penalty=1.0 把分数归零，且 mention_floor 被同乘，使「被点名不可沉默」的设计失效。",
+    "en": "Measured: score 0.9 still held as cooldown; 12 of 14 decisions were reason=cooldown. Three defects: (1) every non-speak records a decline, including gate-forced holds, self-poisoning the backoff; (2) decline counts never expire and each decline refreshes the timer, so backoff never clears (ratchet); (3) allowed=False forces penalty=1.0, zeroing the score and scaling mention_floor away, defeating the documented must-not-be-silent mention signal."
+  },
+  "modules": {
+    "modify": [
+      "grouppig.perception.interrupt.cooldown",
+      "grouppig.perception.interrupt.decision",
+      "grouppig.perception.interrupt.scorer"
+    ]
+  },
+  "acceptance": [
+    "拒绝计数按时间窗过期：窗口外的拒绝不再计入 backoff，且长期静默后 allowed 恢复 True",
+    "被闸门拦下的 hold（reason=cooldown/flooding）不再记入退避拒绝，只有判断性克制（low_score/near_threshold）才计数",
+    "allowed=False 不再强制 penalty=1.0；分数按比例惩罚而非直接归零",
+    "被点名（mentioned>=mention_override）可越过 cooldown/backoff 闸门，但 hourly rate_limited 仍是硬上限",
+    "mention_floor 不再被冷却惩罚同乘，被点名时能抬到阈值以上",
+    "全量测试通过（基线 988 passed），且新增用例能反向验证：注入旧语义时有用例失败"
+  ],
+  "note": "P0/P1 修复；P2（行为抖动滞回）与 P3（阈值策略）不在本变更范围\nP0a 记账口径 + P0b 计数过期 + P1 冷却绝对否决；993 passed，变异自检 5/5",
+  "revision": {
+    "before": null,
+    "after": null
+  },
+  "created_at": "2026-09-25T15:58:03.722Z",
+  "updated_at": "2026-09-25T16:08:41.159Z",
+  "closed_at": "2026-09-25T16:08:41.159Z"
+}

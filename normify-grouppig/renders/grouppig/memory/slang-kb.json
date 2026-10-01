@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.memory.slang-kb",
+  "updated_at": "2026-09-20T16:28:41.684Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "新鲜度管理读取词典。",
+    "en": "Freshness management reads the dictionary."
+  },
+  "order": [
+    "grouppig.memory.slang-kb.dictionary",
+    "grouppig.memory.slang-kb.freshness"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.session.topic.detector",
+  "updated_at": "2026-09-20T16:28:40.287Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "候选生成→边界检测→排序输出。",
+    "en": "Candidate generation, boundary detection, then ranking output."
+  },
+  "order": [
+    "grouppig.session.topic.detector.candidate",
+    "grouppig.session.topic.detector.boundary",
+    "grouppig.session.topic.detector.ranker"
+  ]
+}

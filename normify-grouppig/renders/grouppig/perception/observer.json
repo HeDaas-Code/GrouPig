@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.perception.observer",
+  "updated_at": "2026-09-20T16:28:39.917Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "缓冲器推动滚动时间窗。",
+    "en": "The buffer drives the rolling window."
+  },
+  "order": [
+    "grouppig.perception.observer.buffer",
+    "grouppig.perception.observer.window"
+  ]
+}

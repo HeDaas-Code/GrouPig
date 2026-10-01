@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.expression.orchestrator",
+  "updated_at": "2026-09-20T16:28:41.243Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "心流状态机→规划器→模板选择器。",
+    "en": "Flow state machine, planner, then template selector."
+  },
+  "order": [
+    "grouppig.expression.orchestrator.flow",
+    "grouppig.expression.orchestrator.planner",
+    "grouppig.expression.orchestrator.selector"
+  ]
+}

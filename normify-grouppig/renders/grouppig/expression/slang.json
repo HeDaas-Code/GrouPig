@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.expression.slang",
+  "updated_at": "2026-09-20T16:28:41.429Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "识别、学习、注入黑话。",
+    "en": "Recognize, learn and inject slang."
+  },
+  "order": [
+    "grouppig.expression.slang.recognizer",
+    "grouppig.expression.slang.learner",
+    "grouppig.expression.slang.injector"
+  ]
+}

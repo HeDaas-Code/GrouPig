@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.gateway",
+  "updated_at": "2026-09-22T17:20:44.409Z",
+  "mode": "layers",
+  "max_columns": 3,
+  "reading": {
+    "zh": "adapter 收发 QQ 消息，router 分用与定优先级，sender 负责包装与节流发送；数据自左向右单向流动。",
+    "en": "The adapter receives/sends QQ messages, the router demuxes and prioritizes, the sender composes and throttles; data flows one way."
+  },
+  "order": [
+    "grouppig.gateway.adapter",
+    "grouppig.gateway.router",
+    "grouppig.gateway.sender"
+  ]
+}

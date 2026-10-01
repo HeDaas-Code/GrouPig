@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.gateway.router",
+  "updated_at": "2026-09-20T16:28:39.790Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "分用器识别命令并写入优先级队列。",
+    "en": "The demuxer recognizes commands and writes into the priority queue."
+  },
+  "order": [
+    "grouppig.gateway.router.demux",
+    "grouppig.gateway.router.command",
+    "grouppig.gateway.router.priority"
+  ]
+}

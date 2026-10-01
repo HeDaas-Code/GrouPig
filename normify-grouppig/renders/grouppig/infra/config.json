@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.infra.config",
+  "updated_at": "2026-09-20T16:28:41.833Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "热更新先校验再加载。",
+    "en": "Hot reload validates before loading."
+  },
+  "order": [
+    "grouppig.infra.config.reloader",
+    "grouppig.infra.config.loader",
+    "grouppig.infra.config.validator"
+  ]
+}

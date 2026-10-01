@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.memory",
+  "updated_at": "2026-09-22T17:18:36.670Z",
+  "mode": "layers",
+  "max_columns": 3,
+  "reading": {
+    "zh": "六类存储并列：chat / thread 是消息骨架，profile / social 是人物与关系，session-archive / slang-kb 是归档与黑话；runtime 提供装配与迁移。",
+    "en": "Six stores side by side: chat/thread hold messages, profile/social hold people and relations, session-archive/slang-kb hold archives and slang; runtime provides assembly and migration."
+  },
+  "order": [
+    "grouppig.memory.runtime",
+    "grouppig.memory.chat-store",
+    "grouppig.memory.thread-store",
+    "grouppig.memory.profile-store",
+    "grouppig.memory.social-store",
+    "grouppig.memory.session-archive",
+    "grouppig.memory.slang-kb"
+  ]
+}

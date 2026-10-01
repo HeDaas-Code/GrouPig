@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.memory.chat-store",
+  "updated_at": "2026-09-20T16:28:41.502Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "表结构、DAO 与时间窗索引。",
+    "en": "Schema, DAO and window index."
+  },
+  "order": [
+    "grouppig.memory.chat-store.schema",
+    "grouppig.memory.chat-store.dao",
+    "grouppig.memory.chat-store.window-index"
+  ]
+}

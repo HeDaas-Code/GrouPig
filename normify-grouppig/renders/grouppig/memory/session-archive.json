@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.memory.session-archive",
+  "updated_at": "2026-09-20T16:28:41.647Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "摘要索引依赖档案 DAO。",
+    "en": "The summary index depends on the archive DAO."
+  },
+  "order": [
+    "grouppig.memory.session-archive.dao",
+    "grouppig.memory.session-archive.summary-index"
+  ]
+}

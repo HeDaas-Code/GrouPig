@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.perception.behavior.rhythm",
+  "updated_at": "2026-09-20T16:28:40.132Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "节奏测量结合趋势。",
+    "en": "Rhythm measurement combines with trend."
+  },
+  "order": [
+    "grouppig.perception.behavior.rhythm.meter",
+    "grouppig.perception.behavior.rhythm.trend"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.infra.token-budget",
+  "updated_at": "2026-09-20T16:28:41.756Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "计量器读策略并写报告。",
+    "en": "The meter reads policy and writes reports."
+  },
+  "order": [
+    "grouppig.infra.token-budget.meter",
+    "grouppig.infra.token-budget.policy",
+    "grouppig.infra.token-budget.reporter"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.reflection.strategy",
+  "updated_at": "2026-09-20T16:28:41.057Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "策略综合后校验，必要时回滚。",
+    "en": "Synthesize, validate, and roll back when needed."
+  },
+  "order": [
+    "grouppig.reflection.strategy.synthesizer",
+    "grouppig.reflection.strategy.validator",
+    "grouppig.reflection.strategy.rollback"
+  ]
+}

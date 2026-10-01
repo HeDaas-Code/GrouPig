@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.social.profile.extractor",
+  "updated_at": "2026-09-20T16:28:40.639Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "事实抽取、立场抽取与冲突消解。",
+    "en": "Fact extraction, stance extraction and conflict resolution."
+  },
+  "order": [
+    "grouppig.social.profile.extractor.fact-extractor",
+    "grouppig.social.profile.extractor.stance-extractor",
+    "grouppig.social.profile.extractor.conflict-resolver"
+  ]
+}

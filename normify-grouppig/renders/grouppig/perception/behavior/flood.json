@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.perception.behavior.flood",
+  "updated_at": "2026-09-20T16:28:40.092Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "刷屏判定综合流速与重复度。",
+    "en": "The verdict combines velocity and repetition."
+  },
+  "order": [
+    "grouppig.perception.behavior.flood.verdict",
+    "grouppig.perception.behavior.flood.velocity",
+    "grouppig.perception.behavior.flood.repetition"
+  ]
+}

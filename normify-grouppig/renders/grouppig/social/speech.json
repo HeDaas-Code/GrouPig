@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.social.speech",
+  "updated_at": "2026-09-20T16:28:40.713Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "画像建模器为回复顾问提供风格。",
+    "en": "The profiler provides style to the reply advisor."
+  },
+  "order": [
+    "grouppig.social.speech.profiler",
+    "grouppig.social.speech.responder"
+  ]
+}

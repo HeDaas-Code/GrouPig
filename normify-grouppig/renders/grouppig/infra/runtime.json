@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.infra.runtime",
+  "updated_at": "2026-09-24T03:43:59.536Z",
+  "mode": "grid",
+  "max_columns": 4,
+  "reading": {
+    "zh": "先契约与注册表，再总线与传输（含本地嵌入与 System-1 两条旁路），最后由 di 装配；errors/usage 是共享结构。",
+    "en": "Contract and registry first, then bus and transports (local embedding and System-1 side paths), assembled by di; errors/usage are shared structs."
+  },
+  "order": [
+    "grouppig.infra.runtime.contract",
+    "grouppig.infra.runtime.registry",
+    "grouppig.infra.runtime.bus",
+    "grouppig.infra.runtime.transport",
+    "grouppig.infra.runtime.local-embed",
+    "grouppig.infra.runtime.laya-system1",
+    "grouppig.infra.runtime.di",
+    "grouppig.infra.runtime.usage",
+    "grouppig.infra.runtime.errors"
+  ]
+}

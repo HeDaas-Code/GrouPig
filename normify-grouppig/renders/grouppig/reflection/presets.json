@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.reflection.presets",
+  "updated_at": "2026-09-20T16:28:40.982Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "匹配器读取注册表。",
+    "en": "The matcher reads the registry."
+  },
+  "order": [
+    "grouppig.reflection.presets.matcher",
+    "grouppig.reflection.presets.registry"
+  ]
+}

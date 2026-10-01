@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.infra.model-gateway",
+  "updated_at": "2026-09-20T16:28:41.795Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "模型路由器依赖重试与编解码。",
+    "en": "The model router depends on retry and codec."
+  },
+  "order": [
+    "grouppig.infra.model-gateway.router",
+    "grouppig.infra.model-gateway.retry",
+    "grouppig.infra.model-gateway.codec"
+  ]
+}

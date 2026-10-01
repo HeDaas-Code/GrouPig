@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.expression.identity",
+  "updated_at": "2026-09-20T16:28:41.208Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "追问化解器使用否认话术。",
+    "en": "The deflector uses denial phrasing."
+  },
+  "order": [
+    "grouppig.expression.identity.deflector",
+    "grouppig.expression.identity.denial"
+  ]
+}

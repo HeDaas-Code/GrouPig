@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "2026-09-25-fix-coldstart-and-topic-cascade",
+  "title": {
+    "zh": "修复冷启动不触发插话链路与特征器下游调用形态",
+    "en": "Fix cold-start interrupt trigger and featurizer downstream call shape"
+  },
+  "status": "verified",
+  "intent": {
+    "zh": "真实群聊回放暴露两处主链缺陷，修掉它们才能让「自主说话」链路第一次被真正走到。\n\nF1：aggregator.decide 的 changed = bool(previous) and previous != behavior 在 _current 为空（新群/重启后首次分类）时恒为 False，\nbehavior.changed 永不发布，rpc:interrupt.score 因此从未被调用 —— 主动插话链路在新群里整条不触发。\n证据：新群 classified=1 / changed=0 / published=0；4 群回放 classified=51 仅 changed=3。\n\nF3：featurizer 级联调用 rpc:topic.candidate.generate 时把消息 dict 当第一位置参数（处理器签名为 group_id: int, messages, *, features 序列），\n并把单个特征 dict 当序列传入 features，导致 AttributeError: 'str' object has no attribute 'get'，该设计依赖边永久失败。\n证据：契约形态调用可返回 count=1 / source=features。\n\n本次不复现 F5（总线丢事件）。F4「全程沉默」不是代码缺陷而是阈值策略问题，另行决策。",
+    "en": "Two main-chain defects found by replaying real group chat; fixing them makes the autonomous-speak path reachable for the first time.\n\nF1: changed = bool(previous) and previous != behavior is always False when _current is empty (first classification per group / after restart),\nso behavior.changed is never published and rpc:interrupt.score is never called.\nEvidence: cold group classified=1 / changed=0 / published=0; four-group replay classified=51 but changed=3.\n\nF3: the featurizer cascade passes a message dict as the first positional arg of rpc:topic.candidate.generate\n(handler signature is group_id: int, messages, *, features sequence) and passes a single feature dict where a sequence is expected,\nraising AttributeError: 'str' object has no attribute 'get'; the declared dependency edge always fails.\n\nF5 (bus drop) is not reproduced in this change. F4 (total silence) is a threshold policy decision, not a code defect."
+  },
+  "modules": {
+    "modify": [
+      "grouppig.perception.behavior.classifier.aggregator",
+      "grouppig.perception.normalizer.featurizer"
+    ]
+  },
+  "acceptance": [
+    "F1：新群首次分类即算作行为变化，aggregator.decide 在 previous 为空且 behavior 非空时返回 changed=True；previous 与 behavior 相同时仍为 False。",
+    "F1：新增冷启动回归用例（改前失败、改后通过），现有传 previous=\"smalltalk\" 的用例语义不变。",
+    "F1：4 群机械回放中 aggregator.changed >= 群数 且 decision.decided >= 群数。",
+    "F3：features 级联中 rpc:topic.candidate.generate 返回 ok，边探测 failed 为空。",
+    "F3：新增级联回归用例（断言下游 status 为 ok 且候选数 >= 1）。",
+    "全仓 ruff 全绿；全仓 pytest 全绿（979 + 新增用例）；tools/smoke.py closed-loop 仍绿。",
+    "docs/MODULE_MAP.md 由 tools/gen_skeleton.py 重新生成且 --check 通过。"
+  ],
+  "note": "captain 规划；F1 与 F3 同一工作区，为避免并发跑测试互相污染，F3 依赖 F1。\nF1：aggregator.decide 的 changed 改为 bool(behavior) and previous != behavior，首次观测也算一次变化（冷启动必须能触发插话评分）。F3：featurizer 级联改为契约形态 int(extracted[\"group_id\"]) + features=[dict(extracted)] + now=stamp，并给 extract() 补 ts。验收：全仓 988 passed、ruff 干净、smoke closed-loop 绿、回放 features_edges.failed 为空且 aggregator.changed 3→7、decision.decided 3→7。同步了 tests/test_perception_acceptance.py 两处编码旧语义的断言与事件选取。",
+  "revision": {
+    "before": null,
+    "after": null
+  },
+  "created_at": "2026-09-24T16:11:41.936Z",
+  "updated_at": "2026-09-24T16:36:10.559Z",
+  "closed_at": "2026-09-24T16:36:10.559Z"
+}

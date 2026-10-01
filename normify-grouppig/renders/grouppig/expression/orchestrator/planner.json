@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "grouppig.expression.orchestrator.planner",
+  "updated_at": "2026-09-20T16:28:41.316Z",
+  "mode": "layers",
+  "reading": {
+    "zh": "结构规划支持修订。",
+    "en": "Structure planning supports revision."
+  },
+  "order": [
+    "grouppig.expression.orchestrator.planner.structure",
+    "grouppig.expression.orchestrator.planner.reviser"
+  ]
+}

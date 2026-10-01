@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "id": "2026-09-24-perception-laya-system1",
+  "title": {
+    "zh": "感知层接入 LAY A System-1：结构化 state + 批量类型化问题",
+    "en": "Perception layer on LAY A System-1: structured state with batched typed questions"
+  },
+  "status": "abandoned",
+  "intent": {
+    "zh": "感知层的模型判别当前把窗口压成一段散文提示词交给 rpc:model.classify：LAY A 只能把这段散文当成 state（classify_request 的 state=None 分支），一次也只答一个问题，而感知层早已算出结构化行为特征向量（BehaviorFeatureEncoder）。本次把结构化特征直接作为 state，并把感知层的多个判定维度作为类型化问题（行为类别 choice、是否冷场 noul、强度 score）放进同一次 HTTP，按置信度门控升级对话模型。规则引擎保持权威，模型只作模糊窗口的补充；降级与部分作答必须显式可观测，不得静默。",
+    "en": "The perception model judge currently flattens the window into a prose prompt for rpc:model.classify, so LAY A receives prose as its state and can only answer one question per call, while the perception layer already computes a structured behavior feature vector. This change feeds those structured features as state and asks several typed questions (choice/noul/score) in a single HTTP call, gating escalation on confidence. The rule engine stays authoritative; degradation and partial answers must stay explicitly observable."
+  },
+  "modules": {
+    "modify": [
+      "grouppig.perception.behavior.classifier.llm-judge"
+    ]
+  },
+  "acceptance": [
+    "rpc:behavior.llm.judge 的模型侧依赖改为 rpc:model.system1，state 是 BehaviorFeatureEncoder 产出的结构化特征字典（含 message_count/sender_count/participation/top_sender_share/reply_ratio 等），不再是拼好的散文提示词",
+    "一次 judge 只发一次 HTTP：假 LAY A 服务端记录 hits==1，且请求体 questions 至少含 behavior(choice)/cold(noul)/severity(score) 三个类型化问题",
+    "外部契约不变：rpc:behavior.llm.judge 仍返回 label/confidence/scores/labels/message_count/source 等既有字段，聚合器无需改动；新增 system1 块（source/answered/missing_qids/escalated_to）供观测",
+    "规则引擎仍是权威：judge 不可用或低置信时聚合器行为与改动前一致，既有感知层用例全过",
+    "部分作答显式可观测：LAY A 只答部分问题时 answered/missing_qids 齐全，缺失问题按 confidence=0 计入并触发升级，绝不静默通过",
+    "降级路径不变：LAY A 超时/401/422/503 时回落对话模型且不抛错，judge 仍返回可用结论或 ok=False",
+    "全量测试无新增失败；ruff check 与 ruff format --check src tests tools 通过"
+  ],
+  "note": "终止原因：队长用真实端点做的对照实验推翻了本变更的设计前提。18 例 6 类行为判别的准确率——散文 state + 单问 choice（= 现状生产路径）6/18=33%（随机基线 16.7%）；本变更原设计要改成的数值特征字典 state 只有 1/18=6%；文本对象 state 3/18；散文+统计行 5/18。另外单测「一次 HTTP 批量提问 cold(noul)/repeat(noul)/severity(score)」三个原语无可用判别力（cold 对讨论窗口判 0.88–0.97、repeat 对复读窗口判 0.005–0.14 却对讨论判 0.81–0.94、severity 把闲聊/讨论判得比刷屏还高），且 token 代价约为单问的 2.3 倍。结论：LAY A 的 state 是文本分布，喂数值字典属分布外输入；其 noul/score 原语在群聊行为判别上不产生有效信号（推测因 LAY A 为客服决策域模型）。故现状路径已是实测最优，感知层与 LAY A 的正确关系是「模型仅作模糊窗口补充、规则引擎权威」。实测边界已写入 grouppig.perception.behavior.classifier.llm-judge 的模块描述，防止后续重复该设计。变更相关的 t30/t31 已终止，设计模块依赖已回退为 rpc:model.classify。",
+  "revision": {
+    "before": null,
+    "after": null
+  },
+  "created_at": "2026-09-24T05:31:14.317Z",
+  "updated_at": "2026-09-24T05:42:52.423Z",
+  "closed_at": "2026-09-24T05:42:52.423Z"
+}

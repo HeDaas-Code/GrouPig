@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "2026-09-26-behavior-switch-hysteresis",
+  "title": {
+    "zh": "行为切换滞回：抑制 smalltalk 与 exposition 抖动",
+    "en": "Behavior switch hysteresis to damp smalltalk/exposition flapping"
+  },
+  "status": "verified",
+  "intent": {
+    "zh": "实测（真实语料回放，群 673683844 的 1500s 窗口，22 次判定）：行为在 exposition(conf 0.60-0.99, resolved=True) 与 smalltalk(conf 0.45, resolved=False) 之间来回切换 10 次，其中 4 秒内即反悔。根因是 classify() 每轮无条件提交新行为：规则引擎未判定时回落成默认 smalltalk(0.45)，这个低置信度默认值会顶掉已确定的 exposition。每次切换都会发布 behavior.changed 并触发一次插话评分，造成无谓判定与状态跳变。",
+    "en": "Measured on a real-corpus replay (group 673683844, 1500s window, 22 decisions): behavior flipped 10 times between exposition (conf 0.60-0.99, resolved) and smalltalk (conf 0.45, unresolved), sometimes reversing within 4 seconds. Root cause: classify() unconditionally commits the new behavior each round, so the low-confidence default fallback smalltalk(0.45) displaces an already-resolved exposition. Every flip publishes behavior.changed and triggers an interrupt score."
+  },
+  "modules": {
+    "modify": [
+      "grouppig.perception.behavior.classifier.aggregator"
+    ]
+  },
+  "acceptance": [
+    "未判定(ambiguous)的候选不能顶掉已确定的在任行为，除非置信度超过在任者 switch_margin，或连续出现 switch_confirmations 次",
+    "已确定(resolved)的候选可立即顶掉未判定的在任行为（确定性取代不确定性）",
+    "flooding 一律立即切换（安全例外：刷屏中不得插话）",
+    "冷启动（previous 为空）仍立即切换，F1 语义不变",
+    "真实语料回放（群 673683844，1500s，22 次判定）：切换由 10 次降到 ≤3 次，且不出现 4 秒内的反悔",
+    "全量测试通过（基线 993 passed），且新增用例能反向验证：注入旧语义时有用例失败"
+  ],
+  "note": "P2；P3（阈值/冷启动问候）不在本变更范围。实测边界（诚实记录）：单群探针（严格 70s 判定节奏）673683844 由 10 次降到 2 次，达标；但端到端 3 群回放（判定由消息到达节流驱动、节奏不同）为 40 → 27，273683844 单群 21 → 13，未达 ≤3。差异来自判定节奏：模糊候选只有在被连续重新判定时才可能攒够 switch_confirmations，节流节奏越稀越难达标。故第 5 条按单群探针口径达成，端到端收益是切换减 32%（40 → 27）、插话评分调用减 13 次；如需进一步收敛，应调整 switch_confirmations 或节流参数，而非本变更范围内的滞回规则。\n滞回规则 + 持续性按候选重置；1000 passed，变异自检 6/6；端到端切换 40→27",
+  "revision": {
+    "before": null,
+    "after": null
+  },
+  "created_at": "2026-09-25T16:54:33.488Z",
+  "updated_at": "2026-09-25T17:17:55.224Z",
+  "closed_at": "2026-09-25T17:17:55.224Z"
+}

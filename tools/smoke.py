@@ -114,6 +114,28 @@ profile_interval = 3600
 sweep_interval = 3600
 """
 
+
+def _append_config(base: str, extra: str) -> str:
+    """把 ``extra`` 追加到 ``base`` 上；若两边都有同名段头，先摘掉 ``base`` 的那一段。
+
+    出厂配置现在自带 ``[app.integration]``（记录周期泵节拍与保留策略旋钮），而这里的
+    覆盖项要改的正是同一段 —— 直接追加会出现两个同名段，TOML 解析当场失败
+    （``Cannot declare ('app', 'integration') twice``）。
+    """
+
+    headers = {line.strip() for line in extra.splitlines() if line.strip().startswith("[")}
+    if headers:
+        kept, skipping = [], False
+        for line in base.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("["):
+                skipping = stripped in headers
+            if not skipping:
+                kept.append(line)
+        base = "\n".join(kept)
+    return base.rstrip("\n") + "\n" + extra
+
+
 #: 已确认的既有缺陷（队长已另开任务）：冒烟遇到时按「已知」回单，不重复阻塞、不改别人的文件。
 KNOWN_TASKS = {
     "chat_rows_missing": "t15 gateway-engineer（时序脆弱：计数对但 rpc:chat.query 少读/读 0）",
@@ -140,7 +162,7 @@ def _write_config(tmp_path: Path, ws_url: str, extra: str = EXTRA_CONFIG) -> Pat
     text = text.replace('ws_url = "ws://127.0.0.1:3001"', 'ws_url = "' + ws_url + '"')
     text = text.replace("self_id = 0", "self_id = " + str(SELF_ID))
     path = tmp_path / "grouppig.toml"
-    path.write_text(text + extra, encoding="utf-8")
+    path.write_text(_append_config(text, extra), encoding="utf-8")
     return path
 
 

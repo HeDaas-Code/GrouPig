@@ -45,14 +45,21 @@ INTEGRATION_FLAG_KEYS = (
     "pump_first_tick_immediate",
     "demux_pump",
     "connect",
+    "maintenance",
 )
 #: `[app.integration]` 里必须 > 0 的周期（秒）。
 #:
 #: 0 / 负数不是「跑得快一点」：`runtime/pumps.py` 把间隔钳到 0.0 后
 #: `asyncio.sleep(0)` 会变成忙循环（实测 0.3s 内 35846 拍，吃满一个核）。
-INTEGRATION_INTERVAL_KEYS = ("drain_interval", "profile_interval", "sweep_interval")
+INTEGRATION_INTERVAL_KEYS = ("drain_interval", "profile_interval", "sweep_interval", "maintenance_interval")
 #: `[app.integration]` 里必须 >= 1 的计数。
-INTEGRATION_COUNT_KEYS = ("drain_batch", "profile_window_seconds", "profile_min_messages", "flow_max_steps")
+INTEGRATION_COUNT_KEYS = (
+    "drain_batch",
+    "profile_window_seconds",
+    "profile_min_messages",
+    "flow_max_steps",
+    "retention_limit",
+)
 #: `[app.integration]` 里的嵌套配置表。
 INTEGRATION_TABLE_KEYS = ("session_options", "gateway_options")
 
@@ -179,6 +186,12 @@ def _check_integration_options(report: ValidationReport, config: Config) -> None
                 report.error("type", path, f"应为整数，得到 {type(value).__name__}（{value!r}）")
             elif value < 1:
                 report.error("range", path, f"应 >= 1，得到 {value}")
+        elif key == "retention_keep_seconds":
+            # 0 / 缺省 = 「用记忆层自己的 DEFAULT_KEEP_SECONDS」，所以这里只拦负数与类型。
+            if not _is_number(value):
+                report.error("type", path, f"应为数值（秒），得到 {type(value).__name__}（{value!r}）")
+            elif value < 0:
+                report.error("range", path, f"应 >= 0（0 表示用记忆层默认值），得到 {value}")
         elif key == "dsn":
             if not isinstance(value, str) or not value.strip():
                 report.error("type", path, "应为非空 DSN 字符串")

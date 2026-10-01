@@ -82,6 +82,28 @@ pump_first_tick_immediate = false
 demux_pump = false
 """
 
+
+def _append_config(base: str, extra: str) -> str:
+    """把 ``extra`` 追加到 ``base`` 上；若两边都有同名段头，先摘掉 ``base`` 的那一段。
+
+    出厂配置现在自带 ``[app.integration]``（记录周期泵节拍与保留策略旋钮），而这里的
+    覆盖项要改的正是同一段 —— 直接追加会出现两个同名段，TOML 解析当场失败
+    （``Cannot declare ('app', 'integration') twice``）。
+    """
+
+    headers = {line.strip() for line in extra.splitlines() if line.strip().startswith("[")}
+    if headers:
+        kept, skipping = [], False
+        for line in base.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("["):
+                skipping = stripped in headers
+            if not skipping:
+                kept.append(line)
+        base = "\n".join(kept)
+    return base.rstrip("\n") + "\n" + extra
+
+
 #: 真实感的中文群聊（话题候选生成器要能从里面切出短语，太短的英文串切不出来）。
 CHAT = (
     "周末一起去爬山吧",
@@ -104,7 +126,7 @@ def _write_config(tmp_path: Path, ws_url: str, extra: str = EXTRA_CONFIG) -> Pat
     text = text.replace('ws_url = "ws://127.0.0.1:3001"', 'ws_url = "' + ws_url + '"')
     text = text.replace("self_id = 0", "self_id = " + str(SELF_ID))
     path = tmp_path / "grouppig.toml"
-    path.write_text(text + extra, encoding="utf-8")
+    path.write_text(_append_config(text, extra), encoding="utf-8")
     return path
 
 
@@ -299,6 +321,7 @@ async def test_create_app_builds_every_domain_and_pump(tmp_path: Path) -> None:
             "expression.flow",
             "social.profile",
             "session.sweeper",
+            "maintenance.retention",
         }
         report = app.contract_check()
         assert report["missing"] == []

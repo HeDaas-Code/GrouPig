@@ -134,3 +134,15 @@ on_exceed = "clamp"
 # 主题名只允许出现在 normify-grouppig/api-index.json 的 kafka: 集合中
 strict_topics = true
 handler_timeout = 5.0
+
+[app.integration]
+# 周期泵的节拍与保留策略。留空即用代码默认值；非法值会在启动前被校验器拦下
+# （见 infra/config/validator.py —— 容错读取会把「配错了」和「没配」变成同一件事）。
+#
+# 保留策略（maintenance.retention）：三个清理接口在设计树里都注册了处理器，
+# 却没有任何生产调用方。没有这个泵，chat_window_index 只增不减、黑话库只读不衰、
+# 关系分永不衰减 —— 跑得越久，库越大，「最近」这个语义越不存在。
+maintenance = true
+maintenance_interval = 3600.0   # 秒；清理是慢活，不必勤跑
+retention_limit = 300           # 单轮衰减处理的词条 / 关系边上限
+# retention_keep_seconds = 7200.0  # 过期窗口保留时长（秒）；注释掉 = 用记忆层默认值

@@ -152,7 +152,7 @@ QQ 群消息
   → reflection                    复盘 → 洞察 → 策略 → 预设库
 ```
 
-其中四个**驱动器（泵）**是设计树里没写、但集成层必须补的东西——
+其中五个**驱动器（泵）**是设计树里没写、但集成层必须补的东西——
 设计只描述「谁依赖谁」，不描述「谁在什么时候调谁」：
 
 | 泵 | 周期/触发 | 不装它会怎样 |
@@ -161,6 +161,7 @@ QQ 群消息
 | `expression.flow` | 事件驱动 | 决定说话了，但没人把心流推完、没人发送 |
 | `social.profile` | 30s | 画像与关系分永远是空的 |
 | `session.sweeper` | 60s | 群安静后没人触发归档，反思链路断掉 |
+| `maintenance.retention` | 3600s（跳过首拍） | 窗口索引只增不减、黑话只读不衰、「最近」这个语义不存在（三个清理接口零调用方） |
 
 ### 3.3 群里的命令
 
@@ -196,7 +197,7 @@ uv run python -m grouppig.runtime --panel           # 机器人与面板同进�
 
 ```python
 app.contract_check()                              # 与 api-index 逐字比对：missing / unknown
-await app.health()                                # 各域健康 + 四个泵状态
+await app.health()                                # 各域健康 + 五个泵状态
 app.status()                                      # 同步轻量状态
 await app.drain_once()                            # 手工排空一次感知缓冲
 await app.end_session(group_id, reason="manual")  # 显式收尾 → 归档 → 反思
@@ -385,9 +386,9 @@ await app.end_session(group_id, reason="manual")  # 显式收尾 → 归档 → 
    §22/§23 已证明「链路可达、锁已拆」，剩下的是纯策略问题。
    建议加一个低频冷启动泵（对静默超过 N 秒的群评分）+ 用真实关系分替换
    `scorer` 里那个常量 `intimacy` + 启用已经算好却没人用的 `question_ratio`。
-6. **`MaintenancePump`**：一个周期泵驱动 `rpc:chat.window.prune` + `rpc:slang.decay` +
-   `social_store.decay_scores`，再加一个「归档后删除」的保留策略。
-   今天 `chat_messages` 无上限增长，而唯一的 prune API 没人调。
+6. ~~**`MaintenancePump`**：一个周期泵驱动 `rpc:chat.window.prune` + `rpc:slang.decay` +
+   `social_store.decay_scores`~~ —— **已落地**（`maintenance.retention`，见 §3.2 与 §6.2）。
+   仍待补：`chat_messages` 本体的「归档后删除」保留策略——今天它无上限增长。
 7. **提示词注入加固 + 内容审核挂钩**：用 per-request nonce 围栏包裹不可信块，
    把身份纪律规则放进 system 回合，并消费 `cleaner` 的 `risky` 标签。
 8. **上线前必做**：`config/grouppig.toml` 的 `onebot.self_id` 现在是 `0`。

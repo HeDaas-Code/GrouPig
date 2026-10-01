@@ -40,6 +40,10 @@ RPC_SPEECH_PROFILE = "rpc:speech.profile"
 RPC_RELATIONSHIP_ADJUST = "rpc:relationship.adjust"
 RPC_GRAPH_TIERING = "rpc:graph.tiering"
 RPC_SESSION_UPDATE = "rpc:session.update"
+#: 保留策略三件套：设计树里都注册了处理器，却没有任何生产调用方（见 MaintenancePump）。
+RPC_CHAT_WINDOW_PRUNE = "rpc:chat.window.prune"
+RPC_SLANG_DECAY = "rpc:slang.decay"
+RPC_RELATIONSHIP_DECAY = "rpc:relationship.decay"
 
 TOPIC_MESSAGE_RECEIVED = "kafka:grouppig.qq.message.received"
 TOPIC_INTERRUPT_TRIGGERED = "kafka:grouppig.interrupt.triggered"
@@ -617,15 +621,103 @@ class SessionSweeper(_Pump):
         return {**super().status(), "seen_groups": len(self.seen)}
 
 
+class MaintenancePump(_Pump):
+    """保留策略泵：周期驱动三个「写好了但没人调」的清理接口。
+
+    这三个名字在设计树里都注册了处理器，却**没有任何生产调用方** ——
+    也就是「能力存在但永不发生」：
+
+    * ``rpc:chat.window.prune``：删掉过期的 ``chat_window_index`` 桶。
+      没人调它，而 ``chat_messages`` / 窗口索引是**只增不减**的：跑得越久，
+      库越大，最终把 SQLite 拖到不可用。
+    * ``rpc:slang.decay``：长期不用的黑话词条衰减/退役。没人调它，
+      黑话库只读不衰，一个只火过一周的梗会被当成永久词汇。
+    * ``rpc:relationship.decay``：关系分随时间衰减。没人调它，
+      一年前聊得来的人今天仍然满格亲密 —— 「最近」这个语义不存在。
+
+    与 ``SessionSweeper`` 同一分工：集成层只负责**按时敲门**，清多少、
+    怎么清、阈值多少，全部由各域自己的实现决定。
+
+    默认 ``immediate=False``（跳过首拍）：保留策略是个慢活，没有理由在
+    启动路径上先删一遍库、把就绪时间往后推。
+    """
+
+    name = "maintenance.retention"
+
+    def __init__(
+        self,
+        container: Any,
+        *,
+        interval: float = 3600.0,
+        keep_seconds: float | None = None,
+        decay_limit: int = 300,
+        logger: Any = None,
+    ) -> None:
+        super().__init__(interval=interval, logger=logger)
+        self.container = container
+        self.keep_seconds = keep_seconds
+        self.decay_limit = max(1, int(decay_limit))
+        self.stats.update({"runs": 0, "pruned": 0, "slang_retired": 0, "relationships_decayed": 0, "missing": 0})
+
+    async def tick(self) -> dict[str, Any]:
+        return await self.maintain_once()
+
+    async def maintain_once(self) -> dict[str, Any]:
+        """跑一轮保留策略；任一名字未注册都只记 ``skipped``，不影响其余两个。"""
+
+        tally = CallTally()
+
+        prune_args: dict[str, Any] = {}
+        if self.keep_seconds is not None:
+            prune_args["keep_seconds"] = float(self.keep_seconds)
+        pruned = await best_effort(self.container.call, RPC_CHAT_WINDOW_PRUNE, tally=tally, **prune_args)
+
+        slang = await best_effort(self.container.call, RPC_SLANG_DECAY, tally=tally, limit=self.decay_limit)
+        relationships = await best_effort(
+            self.container.call, RPC_RELATIONSHIP_DECAY, tally=tally, limit=self.decay_limit
+        )
+
+        # prune 直接返回删除行数；decay 返回明细，退役/衰减数取各自的计数字段。
+        pruned_rows = int(pruned or 0) if isinstance(pruned, (int, float)) else 0
+        retired = int((slang or {}).get("counts", {}).get("retired") or 0) if isinstance(slang, Mapping) else 0
+        decayed = int((relationships or {}).get("decayed") or 0) if isinstance(relationships, Mapping) else 0
+
+        self.stats["runs"] += 1
+        self.stats["pruned"] += pruned_rows
+        self.stats["slang_retired"] += retired
+        self.stats["relationships_decayed"] += decayed
+        self.stats["missing"] += tally.skipped + tally.failed
+        if pruned_rows or retired or decayed:
+            self._log(
+                "info",
+                "maintenance.retention",
+                pruned=pruned_rows,
+                slang_retired=retired,
+                relationships_decayed=decayed,
+            )
+        return {
+            "pruned": pruned_rows,
+            "slang_retired": retired,
+            "relationships_decayed": decayed,
+            "calls": tally.as_dict(),
+        }
+
+    def status(self) -> dict[str, Any]:
+        return {**super().status(), "keep_seconds": self.keep_seconds, "decay_limit": self.decay_limit}
+
+
 __all__ = [
     "RPC_CHAT_WINDOW",
+    "RPC_CHAT_WINDOW_PRUNE",
     "RPC_DRAIN",
     "RPC_FACT_EXTRACT",
     "RPC_FLOW_END",
     "RPC_FLOW_NEXT",
     "RPC_GRAPH_TIERING",
     "RPC_RELATIONSHIP_ADJUST",
+    "RPC_RELATIONSHIP_DECAY",
     "RPC_SESSION_UPDATE",
+    "RPC_SLANG_DECAY",
     "RPC_SPEECH_PROFILE",
     "RPC_STANCE_EXTRACT",
     "TOPIC_INTERRUPT_TRIGGERED",
@@ -633,6 +725,7 @@ __all__ = [
     "CallTally",
     "DrainPump",
     "FlowDriver",
+    "MaintenancePump",
     "ProfilePump",
     "SessionSweeper",
     "best_effort",

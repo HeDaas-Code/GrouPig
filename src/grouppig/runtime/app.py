@@ -44,7 +44,7 @@ from grouppig.infra.runtime import contract as contract_module
 from grouppig.infra.runtime.di import Container, build_container
 from grouppig.infra.runtime.errors import GrouPigError
 from grouppig.runtime.errors import IntegrationError
-from grouppig.runtime.pumps import DrainPump, FlowDriver, ProfilePump, SessionSweeper
+from grouppig.runtime.pumps import DrainPump, FlowDriver, MaintenancePump, ProfilePump, SessionSweeper
 
 #: 默认配置文件（相对路径；解析时先看 cwd，再顺着包的位置回到仓库根）。
 DEFAULT_CONFIG_PATH = "config/grouppig.toml"
@@ -135,6 +135,14 @@ class IntegrationOptions:
     sweep_interval: float = 60.0
     #: 是否开启会话收尾巡检。
     sweep: bool = True
+    #: 保留策略巡检周期（秒）。默认 1 小时：清理是慢活，不必勤跑。
+    maintenance_interval: float = 3600.0
+    #: 是否开启保留策略巡检（过期窗口清理 / 黑话衰减 / 关系分衰减）。
+    maintenance: bool = True
+    #: 过期窗口保留时长（秒）；`None` 时用记忆层自己的 `DEFAULT_KEEP_SECONDS`。
+    retention_keep_seconds: float | None = None
+    #: 单轮衰减处理的词条 / 关系边上限。
+    retention_limit: int = 300
     #: 单条心流最多推几步（防止结构步骤异常时死循环）。
     flow_max_steps: int = 8
     #: 回复发送只走 `kafka:grouppig.reply.composed`（`True`）还是 `rpc:flow.end(send=True)`。
@@ -181,6 +189,10 @@ class IntegrationOptions:
             profile_min_messages=_integer(config, "app.integration.profile_min_messages", 2),
             sweep_interval=_number(config, "app.integration.sweep_interval", 60.0),
             sweep=_flag(config, "app.integration.sweep", True),
+            maintenance_interval=_number(config, "app.integration.maintenance_interval", 3600.0),
+            maintenance=_flag(config, "app.integration.maintenance", True),
+            retention_keep_seconds=_number(config, "app.integration.retention_keep_seconds", 0.0) or None,
+            retention_limit=_integer(config, "app.integration.retention_limit", 300),
             flow_max_steps=_integer(config, "app.integration.flow_max_steps", 8),
             flow_send_via_topic=_flag(config, "app.integration.flow_send_via_topic", True),
             pumps=_flag(config, "app.integration.pumps", True),
@@ -205,6 +217,10 @@ class IntegrationOptions:
             "profile_min_messages": self.profile_min_messages,
             "sweep_interval": self.sweep_interval,
             "sweep": self.sweep,
+            "maintenance_interval": self.maintenance_interval,
+            "maintenance": self.maintenance,
+            "retention_keep_seconds": self.retention_keep_seconds,
+            "retention_limit": self.retention_limit,
             "flow_max_steps": self.flow_max_steps,
             "flow_send_via_topic": self.flow_send_via_topic,
             "pumps": self.pumps,
@@ -216,7 +232,7 @@ class IntegrationOptions:
 
 @dataclass
 class GrouppigApp:
-    """单进程闭环：一个容器 + 八个域 + 四个泵。"""
+    """单进程闭环：一个容器 + 八个域 + 五个泵。"""
 
     container: Container
     options: IntegrationOptions = field(default_factory=IntegrationOptions)
@@ -231,6 +247,7 @@ class GrouppigApp:
     flow_driver: FlowDriver | None = None
     profile_pump: ProfilePump | None = None
     session_sweeper: SessionSweeper | None = None
+    maintenance_pump: MaintenancePump | None = None
     started_at: float = 0.0
     _started: bool = False
 
@@ -252,7 +269,13 @@ class GrouppigApp:
     def pumps(self) -> tuple[Any, ...]:
         return tuple(
             pump
-            for pump in (self.drain_pump, self.flow_driver, self.profile_pump, self.session_sweeper)
+            for pump in (
+                self.drain_pump,
+                self.flow_driver,
+                self.profile_pump,
+                self.session_sweeper,
+                self.maintenance_pump,
+            )
             if pump is not None
         )
 
@@ -315,7 +338,7 @@ class GrouppigApp:
 
     # ---- 驱动泵 --------------------------------------------------------
     def start_pumps(self) -> tuple[Any, ...]:
-        """拉起四个泵（幂等）。"""
+        """拉起五个泵（幂等）。"""
 
         logger = getattr(self.container, "logger", None)
         bus = getattr(self.container, "bus", None)
@@ -351,6 +374,14 @@ class GrouppigApp:
                 self.container, bus=bus, interval=self.options.sweep_interval, logger=logger
             )
             self.session_sweeper.attach()
+        if self.maintenance_pump is None and self.options.maintenance:
+            self.maintenance_pump = MaintenancePump(
+                self.container,
+                interval=self.options.maintenance_interval,
+                keep_seconds=self.options.retention_keep_seconds,
+                decay_limit=self.options.retention_limit,
+                logger=logger,
+            )
         immediate = self.options.pump_first_tick_immediate
         for pump in self.pumps:
             if pump.name == FlowDriver.name:

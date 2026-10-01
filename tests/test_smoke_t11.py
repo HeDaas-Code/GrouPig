@@ -71,7 +71,7 @@ def test_closed_loop_evidence_is_specific(smoke_report: dict[str, Any]) -> None:
     links = _scenario(smoke_report, "closed-loop")["links"]
     assert links["cold_start"]["rows_before"] == 0
     assert links["cold_start"]["domains"] == 8
-    assert len(links["cold_start"]["pumps"]) == 4
+    assert len(links["cold_start"]["pumps"]) == 5
     assert links["memory"]["roles"] == ["member"]
     assert links["memory"]["senders"] == sorted({user for _, user in smoke.SCRIPT})
     assert links["topic"]["group_ids"] == [smoke.GROUP_ID]

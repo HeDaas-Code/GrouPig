@@ -1,7 +1,7 @@
 # GrouPig 端到端集成（grouppig.runtime）落地说明
 
 > 归属：`gateway-engineer`（任务 t10「端到端闭环集成」）。
-> 本文件描述**单进程闭环**的启动入口、装配顺序、四个驱动器，以及集成期发现并修掉的跨域缺陷。
+> 本文件描述**单进程闭环**的启动入口、装配顺序、五个驱动器，以及集成期发现并修掉的跨域缺陷。
 
 ## 1. 一行启动
 
@@ -24,7 +24,7 @@ uv run python -m grouppig.runtime --no-connect --no-pumps
 ```python
 from grouppig.runtime import create_app
 
-app = await create_app("config/grouppig.toml")   # 装配 + 连 OneBot + 拉起四个泵
+app = await create_app("config/grouppig.toml")   # 装配 + 连 OneBot + 拉起五个泵
 ...
 await app.aclose()
 ```
@@ -58,10 +58,10 @@ infra → memory → perception → session → social → reflection → expres
 | 7 | expression | `install_expression_domain` | 依赖 social（预设/画像）与 memory（上下文） |
 | 8 | gateway | `install`（`start=True`） | **最后**连 OneBot：连上就可能来消息，此时全链路必须已就绪 |
 
-## 3. 四个驱动器（`src/grouppig/runtime/pumps.py`）
+## 3. 五个驱动器（`src/grouppig/runtime/pumps.py`）
 
 设计树只描述「谁依赖谁」，不描述「**谁在什么时候调谁**」。缺的不是边，是**时钟与触发器**。
-所以集成层补了四个驱动器：
+所以集成层补了五个驱动器：
 
 | 泵 | 名字 | 触发 | 干什么 | 没有它会怎样 |
 | --- | --- | --- | --- | --- |
@@ -69,6 +69,7 @@ infra → memory → perception → session → social → reflection → expres
 | `FlowDriver` | `expression.flow` | 事件 `kafka:grouppig.interrupt.triggered` | 取活跃流程 → `rpc:flow.next` 推到 done → `rpc:flow.end` | 决定说话了，但没人把心流推完、没人发送 |
 | `ProfilePump` | `social.profile` | 周期（默认 30s）+ 入站消息记账 | `rpc:chat.window` → 事实/立场抽取 + 说话画像 + 关系分 → `rpc:graph.tiering` | 画像与关系分永远是空的 |
 | `SessionSweeper` | `session.sweeper` | 周期（默认 60s） | 对「最近说过话的群」调 `rpc:session.update` | 群安静下来后没人再触发归档检查，`session.completed` 永不发布，反思链路断掉 |
+| `MaintenancePump` | `maintenance.retention` | 周期（默认 3600s，**跳过首拍**） | `rpc:chat.window.prune` + `rpc:slang.decay` + `rpc:relationship.decay` | 三个清理接口都写好了却没人调：窗口索引只增不减、黑话只读不衰、「最近」这个语义不存在 |
 
 两个关键实现细节：
 
@@ -162,7 +163,7 @@ connect = true
 
 ```python
 app.contract_check()      # 与 api-index 逐字比对：missing / unknown / by_scope
-await app.health()        # 各域健康 + 四个泵状态（会 await 协程型 health）
+await app.health()        # 各域健康 + 五个泵状态（会 await 协程型 health）
 app.status()              # 同步轻量状态
 await app.drain_once()    # 手工排空一次感知缓冲
 await app.end_session(group_id, reason="manual")   # 显式收尾 → 归档 → 反思
@@ -231,7 +232,7 @@ NEW   task=grouppig.gateway.router.demux.pump → perception.ingest → rpc:chat
 uv run python -m pytest tests/test_integration_e2e.py -q -o addopts=""
 ```
 
-覆盖：单进程入口与契约自检、八个域与四个泵装配、入站消息贯通（网关/感知/记忆/会话）、
+覆盖：单进程入口与契约自检、八个域与五个泵装配、入站消息贯通（网关/感知/记忆/会话）、
 话题与会话按真实群号归属、画像与关系分、决策→生成→节流发送（并验证只发一次）、
 节流器真的会推迟第二次发送、会话结束触发反思、收尾泵、周期泵首拍开关（两个方向）、
 优雅关闭、幂等启动。

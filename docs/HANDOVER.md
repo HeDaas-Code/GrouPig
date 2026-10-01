@@ -245,11 +245,38 @@ await app.end_session(group_id, reason="manual")  # 显式收尾 → 归档 → 
 | 7 | — | `ruff format --check` 实际是红的（8 个文件），与计划书声称的「全清」不符 | 格式化修复 |
 | 8 | — | 仓库没有任何 CI | 新增 `.github/workflows/ci.yml`，六道门禁 |
 
-### 6.2 第二批：认知链路与运维（见 §7 的对应条目）
+### 6.2 第二批：认知链路、会话生命周期、连接器与运维面（已提交）
 
-第二批由三名并行工匠施工，覆盖：感知/社交域的四个确证缺陷、
-把社交关系接进回复（"让脑子接上嘴"）、多气泡拟人节奏、
-以及运维面加固（`--check` 语义、可安装性、配置校验、面板安全、密钥卫生）。
+| 域 | 级别 | 问题 | 修法 |
+| --- | --- | --- | --- |
+| connector | **高** | **socket 与读循环双泄漏，且 `close()` 永久挂死**：`_handle_disconnect` 只把 `self._ws` 置空却从不关闭那个 socket，更早的连接失去引用后既没人关、它的读循环也永远挂在 `async for` 上。实测关停无法退出（进程关不掉） | 追踪**全部**在途 socket / 读循环，`close()` 逐一有界回收；`status()` 暴露 `live_sockets` / `live_readers` |
+| connector | 高 | **半开连接永不发现**：`ping_interval` 默认 `None` = 关闭 WS 保活；心跳失败只加计数、无人消费 → NAT 掉线后 `state` 永远 `"open"` | 默认开启保活（20s）；连续心跳失败到阈值即判定连接已死、强制重连（`stale_disconnects`） |
+| connector | 中 | **坏帧自伤重连**：`send()` 把任何异常都当传输故障 → 缓冲 + 重连。一个超长帧或孤立代理项会在每次重连时被重发、再次弄死新连接 | 新增 `FrameRejected`：编码/尺寸错误在缓冲判断**之前**抛，不缓冲、不重连 |
+| connector | 中 | 带 `echo` 但无在途请求的帧会继续往下走，被当成 `unknown.empty` 事件派发并抬高 `events_received` | 计 `unmatched_responses` 后返回 |
+| connector | 中 | `_handle_disconnect` 无身份校验，陈旧读循环退出会清掉之后才建好的健康连接 | 增加 ws 身份校验 |
+| connector | 中 | 关停时 outbox 残留帧既不计数也不打日志 | 新增 `discarded_on_close` 计数 + 告警 |
+| session | **高** | **真实消息静默丢失**：linker 那次纯记账更新（记 `thread_id`）没关 `check_archive`，会顺手把会话归档；主流程 `states.update` 随即撞上 `InvalidTransition` 并被 `contextlib.suppress` 一把吞掉 —— 那条消息既不在任何会话里、也不在任何档案里，直接从反思链路消失，而调用方看到的是一次成功处理 | 记账更新改 `check_archive=False`；`di.py` 只接住预期异常并**补开会话把消息接住**，保证「每条被接受的消息都恰好落进一个会话」 |
+| session | 高 | **重复归档**：`archive()` 只守卫了状态转移，转移之后仍无条件取消息/存档/发事件。三个并发入口 + `gather` 分发下，两个 `archive()` 会写两份档案、发两次 `session.completed`（实测复现）→ 同一场会话被复盘两遍 | 按 `session_id` 单飞 + 幂等；缓存随会话回收 |
+| perception | **blocker** | **LLM 行为裁判收到的是 `RollingWindow` 对象**，不是消息行 → 提示词以 `"群聊记录：\n"` 结尾；`message_count=0` 无人检查，而任何合法标签都被当 `resolved=True`，可以瞬间顶掉可信的在任行为 | 按群物化消息行（`RollingWindow.slice(group_id, ...)`，不传 `group_id` 会混群）；空转写直接返回 `ok=False` 且**不调用模型** |
+| perception | 高 | **去重窗泄漏**：重复命中只加计数不落桶行，`_prune` 无从递减 → 内容**永久**被判重复，永久排除在聊天线编织之外 | 计数与桶行一一对应 |
+| social | 高 | `relationship.adjust` 在**恰好 300 条边**处断崖（见 §7.2） | 改为直读本人那条边 |
+| ops | 高 | `--check` 不是检查（见 §7.2） | 不再连 OneBot、不跑迁移、不起泵；失败一行错误；装配中途失败也收尾容器 |
+| ops | 高 | 非法 `app.integration.*` 静默变默认值 | 校验类型与范围为**错误** |
+| ops | 高 | 包无法在源码树外导入 | `[project.scripts]` + api-index 仓库优先、随包副本兜底 |
+| ops | 中 | 面板无鉴权且回显聊天原文 | 非回环需显式放行、可选共享密钥、`Host` 校验、摘要不回显原文 |
+| ops | 中 | 密钥卫生 | 不再接受裸 `KEY`；DSN 值里的密码在日志/health 中打码 |
+| ops | 中 | `panel tui` 永远渲染空面板 | 先装配再交给 TUI |
+
+### 6.3 第三批：把社交关系接进回复 + 多气泡节奏（已提交）
+
+见 §7.4 的「声明了但没接上」清单——这一批专门消灭「代码在、测试绿、但对行为零影响」的能力空洞。
+
+| 项 | 内容 |
+| --- | --- |
+| **关系分层接进提示词** | `rpc:relationship.get` 此前在 `social/` 之外**零调用**：整个社交图（分数、四档分层、衰减、135 个测试）是只写的，陌生人与挚友得到逐字相同的语气。现在把 `tier_label` + `score` 渲染成上下文块，并喂进选择器特征 |
+| **多气泡拟人节奏** | 规划器产出多份草稿、此前丢掉除最后一份外的全部；`flow.end` 现在发有序气泡列表，composer 按长度插入延迟（延迟可注入、默认关闭，避免拖慢测试） |
+| **反思闭环接通** | `generate_strategy` 从未被传 `True`，`rpc:strategy.*` / `rpc:presets.register` 零生产调用方。现在会话收尾会生成并注册策略，预设库随会话增长 |
+| **并发双发** | `flow.end` 的幂等发送是跨 `await` 的 check-then-act，无锁；`FlowDriver` 对每个触发事件都 `create_task`、无按群去重。实测两个并发 `flow.end` → 2 次发送 / 2 次发布 |
 
 ---
 

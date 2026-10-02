@@ -126,6 +126,9 @@ def _panel_tap(event: Any) -> None:
         from grouppig.panel.snapshot import EVENTS
 
         EVENTS.record(event.topic, event.payload, source=str(getattr(event, "source", "") or ""))
+        from grouppig.panel.telemetry import record_event
+
+        record_event(event)
     except Exception:  # noqa: BLE001 - 观测面不许干扰主流程
         return
 

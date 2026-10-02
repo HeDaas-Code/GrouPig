@@ -3,7 +3,7 @@
 三种用法：
 
 * ``python -m grouppig.panel --snapshot [--json]`` —— 打印一份快照后退出（不连 OneBot）；
-* ``python -m grouppig.panel web [--host H] [--port P]`` —— 启动只读 Web 面板；
+* ``python -m grouppig.panel web [--host H] [--port P]`` —— 启动 Web 命令控制台；
 * ``python -m grouppig.panel tui [--once] [--interval S]`` —— 启动终端面板。
 
 默认只监听 ``127.0.0.1``：绑非本机地址必须显式 ``--allow-remote``，并且建议同时设
@@ -25,13 +25,14 @@ from typing import Any
 from sqlalchemy import text
 
 from grouppig.panel.snapshot import SnapshotOptions, build_snapshot
+from grouppig.panel.viewmodel import build_dashboard_snapshot
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8848
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="grouppig.panel", description="GrouPig 管理面板（只读）")
+    parser = argparse.ArgumentParser(prog="grouppig.panel", description="GrouPig 命令控制台（Web/TUI 运维仪表盘）")
     # `--dsn` 这类公共开关同时挂到子命令上：`panel tui --dsn …` 比
     # `panel --dsn … tui` 更符合直觉，而 argparse 默认只认后者。
     common = argparse.ArgumentParser(add_help=False)
@@ -44,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="快照以 JSON 输出")
     parser.add_argument("--no-tables", action="store_true", help="快照不查数据表行数")
     sub = parser.add_subparsers(dest="command")
-    web = sub.add_parser("web", parents=[common], help="启动只读 Web 面板")
+    web = sub.add_parser("web", parents=[common], help="启动 Web 命令控制台")
     web.add_argument("--host", default=DEFAULT_HOST)
     web.add_argument("--port", type=int, default=DEFAULT_PORT)
     web.add_argument("--token", default=None, help="共享密钥；设了之后请求要带 ?token= 或 X-Panel-Token")
@@ -92,7 +93,9 @@ async def _table_counts(app: Any, *, limit: int) -> dict[str, Any]:
 
 
 @contextlib.contextmanager
-def live_runtime(args: argparse.Namespace) -> Iterator[tuple[Any, Callable[[], dict[str, Any]]]]:
+def live_runtime(
+    args: argparse.Namespace,
+) -> Iterator[tuple[Any, Callable[[], dict[str, Any]], asyncio.AbstractEventLoop]]:
     """装配 app 并在后台线程里跑事件循环；产出 ``(app, 取快照函数)``。
 
     前端（TUI / Web）都要**活的** app 才有东西可显示；表行数又必须异步查
@@ -118,7 +121,7 @@ def live_runtime(args: argparse.Namespace) -> Iterator[tuple[Any, Callable[[], d
         return result
 
     try:
-        yield app, provider
+        yield app, provider, loop
     finally:
         asyncio.run_coroutine_threadsafe(app.aclose(), loop).result(timeout=10)
         loop.call_soon_threadsafe(loop.stop)
@@ -153,12 +156,12 @@ def run_tui(args: argparse.Namespace) -> int:
 
     from grouppig.panel import tui
 
-    with live_runtime(args) as (app, provider):
+    with live_runtime(args) as (app, provider, _loop):
         return tui.run(app, interval=args.interval, once=args.once, provider=provider)
 
 
 def serve_web(args: argparse.Namespace) -> int:
-    """装配运行时并启动只读 Web 面板（不连 OneBot）。
+    """装配运行时并启动 Web 命令控制台（不连 OneBot）。
 
     面板需要「活的」运行时才有意义：快照里的域、泵、注册名都来自 app。
     表行数要异步查询，所以这里在事件循环里把快照函数换成一个已连接 database 的实现。
@@ -166,7 +169,7 @@ def serve_web(args: argparse.Namespace) -> int:
 
     from grouppig.panel import web
 
-    with live_runtime(args) as (app, provider):
+    with live_runtime(args) as (app, provider, loop):
         settings = web.PanelSettings.from_config(
             getattr(app.container, "config", None),
             host=args.host,
@@ -178,7 +181,19 @@ def serve_web(args: argparse.Namespace) -> int:
             def snapshot(self) -> dict[str, Any]:  # type: ignore[override]
                 return provider()
 
-        httpd = web.serve(host=args.host, port=args.port, panel=LivePanel(app, SnapshotOptions(), settings))
+            def dashboard(self, *, window_seconds: int = 3600) -> dict[str, Any]:  # type: ignore[override]
+                result = build_dashboard_snapshot(
+                    app, SnapshotOptions(include_tables=False), window_seconds=window_seconds
+                )
+                live = provider()
+                result["tables"] = live.get("tables", {})
+                result["memory"]["tables"] = result["tables"]
+                result["overview"]["table_rows"] = sum(
+                    v for v in (result["tables"].get("tables", {}) or {}).values() if isinstance(v, int)
+                )
+                return result
+
+        httpd = web.serve(host=args.host, port=args.port, panel=LivePanel(app, SnapshotOptions(), settings, loop=loop))
         address, port = httpd.server_address[0], httpd.server_address[1]
         hint = "（只读，Ctrl-C 退出）" + ("；需要 ?token=…" if settings.token else "")
         print(f"GrouPig 面板已启动：http://{address}:{port}/{hint}")

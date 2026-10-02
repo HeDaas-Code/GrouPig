@@ -79,6 +79,9 @@ class EventRing:
         items = list(self._items)
         return items[-limit:]
 
+    def clear(self) -> None:
+        self._items.clear()
+
     def __len__(self) -> int:
         return len(self._items)
 

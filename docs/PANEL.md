@@ -1,66 +1,87 @@
-# 管理面板（grouppig.panel）
+# 管理面板（`grouppig.panel`）
 
-只读运维面板：把运行时健康、契约自检、数据表与事件流整理成视图，
-**Web（浏览器）与 TUI（终端）共用同一份快照**。
+GrouPig 的运维控制台现在是**类 Unix / 冷战终端机**风格：黑蓝底、等宽字体、细网格、磷光绿状态与琥珀色警告。Web 与 TUI 使用同一份 `dashboard view-model`，因此两处看到的运行状态、域、泵、事件线、激活网络、精力系统、记忆与配置保持一致。
 
-## 1. 三种用法
+## 1. 启动
 
-| 命令 | 说明 |
-| --- | --- |
-| `uv run python -m grouppig.panel --snapshot [--json]` | 打印一份快照后退出（会装配运行时、不连 OneBot） |
-| `uv run python -m grouppig.panel web [--host 127.0.0.1] [--port 8848]` | 启动只读 Web 面板（自建运行时） |
-| `uv run python -m grouppig.panel tui [--once] [--interval 2]` | 终端面板；无 TTY 时自动降级为文本 |
-| `uv run python -m grouppig.runtime --panel` | **机器人 + 面板同进程**（推荐：面板看到的就是线上那一份运行时） |
-
-`--panel-host` 默认 `127.0.0.1`：对外访问请自行加反向代理与鉴权（面板本身不做认证）。
-
-## 2. 结构
-
-```
-grouppig.panel             容器
-├── grouppig.panel.snapshot  快照层：唯一数据来源，Web/TUI 都只依赖它
-├── grouppig.panel.web       标准库 http.server 的只读 Web 前端
-└── grouppig.panel.tui       curses 终端前端（无 TTY 降级为文本）
+```bash
+uv run python -m grouppig.panel --snapshot --json
+uv run python -m grouppig.panel web --host 127.0.0.1 --port 8848
+uv run python -m grouppig.panel tui --interval 2
+uv run python -m grouppig.runtime --panel
 ```
 
-**为什么分开**：快照是纯数据、可序列化、不抛错；两个前端只做渲染。
-新增视图（如「会话详情」）只改前端，不动数据层。
+默认只监听 `127.0.0.1`。对外监听必须显式使用 `--allow-remote` / `--panel-allow-remote`，并建议通过反向代理、网络 ACL 与共享 token 保护。不要把模型、OneBot 或 LAYA 密钥放到仓库配置或浏览器 URL 中。
 
-## 3. 快照内容
+## 2. Web 控制台
 
-| 字段 | 来源 | 说明 |
+导航视图：
+
+- **SITREP**：在线状态、uptime、八域健康矩阵、泵运行矩阵、告警队列、事件尾部与当前精力；
+- **RUNTIME**：运行时、契约自检、registry 与泵统计；
+- **EVENTS**：事件总线最近摘要。自由文本默认只显示长度或脱敏摘要；
+- **ACTIVATION**：多钩子激活权重、被叫名字 / 引用 / 兴趣 tag、事件线、原子碎片记忆、跨群晋升状态与精力系统；
+- **MEMORY**：契约数据表行数及内存摘要；
+- **CONFIG**：当前配置树、来源与 fingerprint，以及 JSON patch 验证 / 应用；
+- **AUDIT**：配置与泵操作的进程内审计记录。
+
+主要 API：
+
+| 方法 | 端点 | 用途 |
 | --- | --- | --- |
-| `app` | `app.status()` | 启动状态、运行时长、注册名数、泵 |
-| `contract` | `app.contract_check()` | `registered` / `missing` / `unknown`（兼容裸容器） |
-| `registry` | `container.registry.names()` | 总数 + 按前缀分组 + 全量名字 |
-| `domains` | `app.domains` | 六域是否装配 |
-| `pumps` | `app.pumps` | 各泵的 running/interval/ticks |
-| `tables` | memory `Database.fetch_all` | 10 张契约表的行数（单表失败只记该表 error） |
-| `events` | `EventBus.publish` 打点 | 最近事件（环形缓冲，默认 200 条，进程内不落库） |
+| `GET` | `/api/dashboard` | 统一仪表盘 view-model（推荐） |
+| `GET` | `/api/snapshot` | 旧版快照兼容端点 |
+| `GET` | `/api/health` | 精简健康状态 |
+| `GET` | `/api/runtime` | 运行时 / registry / contract |
+| `GET` | `/api/events?limit=N` | 事件尾部 |
+| `GET` | `/api/data/tables` | 数据表统计 |
+| `GET` | `/api/data/table/{name}?limit=N&offset=N` | 白名单契约表分页读取（文本自动脱敏） |
+| `GET` | `/api/config` | 脱敏配置树 |
+| `GET` | `/api/audit?limit=N` | 操作审计 |
+| `POST` | `/api/events/clear` | 清空进程内事件环并写审计 |
+| `POST` | `/api/config/validate` | 验证 `{ "patch": {...} }`，不应用 |
+| `POST` | `/api/config/apply` | 应用内存配置；加 `"persist": true` 才写 local TOML |
+| `POST` | `/api/config/reload` | 重新加载配置文件并校验 |
+| `POST` | `/api/runtime/reload` | 运行时配置重载别名 |
+| `POST` | `/api/pumps/{name}` | 用 `{ "action": "start\|stop\|restart" }` 控制泵 |
 
-任何一部分失败都降级成 `{"error": "..."}`，**面板绝不因为一个子系统挂掉而整体不可用**。
+配置写操作的边界：
 
-## 4. HTTP 端点
+1. 先验证，再应用；验证失败保留旧配置；
+2. `api_key`、`token`、`secret`、`password`、`credential` 等字段永远不回显，也不能通过面板写入；
+3. 持久化只写 `config/grouppig.local.toml`，使用临时文件 + `os.replace` 原子替换；
+4. 不提供任意 SQL、任意 Python 或任意文件写入；
+5. 所有写操作都进入审计环，面板主链路失败不应影响机器人业务链路。
 
-| 端点 | 内容 |
-| --- | --- |
-| `GET /` | 单页 HTML（内联样式 + 原生 JS，每 2 秒轮询快照） |
-| `GET /api/snapshot` | 完整快照 JSON |
-| `GET /api/health` | 精简健康：`started` / `contract_missing` / `registry_total` |
-| `GET /api/events?limit=N` | 事件流尾部 |
+共享 token 可以通过 `--token` / `[panel].token` 配置，HTTP 头为 `X-Panel-Token`，浏览器访问也可用 `?token=...`。生产环境优先使用 HTTP 头，不要把 token 留在浏览器历史记录中。
 
-写请求（POST 等）由标准库返回 501：**面板是只读的**，写操作不在本变更范围。
+## 3. TUI 控制台
 
-## 5. 事件流是怎么来的
+大于 `80x20` 的终端显示多窗格：
 
-`EventBus.publish` 里加了一个**可选的打点**（`infra/runtime/bus.py` 的 `_panel_tap`）：
-把事件主题与负载摘要塞进 `panel.snapshot.EVENTS` 环形缓冲。
-打点整体包在 `try/except` 里——面板未安装、缓冲异常都静默忽略，
-**观测面永远不许影响事件总线的正常投递**。
+- 顶部：节点、在线状态、uptime、时间；
+- 左栏：域健康；
+- 中栏：`1` 总览、`2` runtime、`3` 事件、`4` activation、`5` memory、`6` config；
+- 右栏：泵矩阵与最近事件；
+- 底栏：`R` 刷新、`P` 暂停、`Q` 退出。
 
-## 6. 已知边界
+没有 TTY 或窗口太小时，自动降级到可管道处理的文本输出；`--once` 总是输出一次快照。文本模式保留 `启动: ...`、`注册名: ...` 等旧脚本标记。
 
-* 只读：手动回复、归档会话、改配置都不支持（需另开变更，并加鉴权）；
-* 事件只存在进程内存里，重启即空；要持久化需接 `kafka:` 消费端；
-* 无鉴权：仅适合本机或受信内网；对外暴露前必须加认证层；
-* 快照按请求实时计算（含一次表行数查询），高并发下应加缓存——当前是运维面板，未做。
+## 4. 统一数据模型
+
+`grouppig.panel.viewmodel.build_dashboard_snapshot()` 输出：
+
+```text
+overview / runtime / domains / pumps / activation
+/events / memory / tables / config / alerts / audit
+```
+
+旧的 `build_snapshot()` 保持兼容。面板读取任何子系统失败时都将该分区降级为错误或不可用状态，不因为一张表或一个域失败而阻塞整个控制台。
+
+## 5. 安全与隐私
+
+- 面板默认本机监听；Host 白名单防止常见 DNS rebinding 场景；
+- 事件摘要默认脱敏群聊原文；
+- 激活网络只展示事件线与碎片元数据，敏感内容不回显；
+- 配置 view 中的凭据字段统一 `<redacted>`；
+- 审计环与事件环都在进程内，重启后清空；需要长期留存时应接入受控存储，而不是扩大面板权限。

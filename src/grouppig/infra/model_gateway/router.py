@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Any
@@ -369,6 +370,9 @@ class ModelRouter:
                 request = replace(request, params={**request.params, "max_tokens": reservation.output_tokens})
 
         started = time.perf_counter()
+        wall_started = time.time()
+        trace_id = request.request_id or f"trace-model-{uuid.uuid4().hex[:16]}"
+        span_id = f"span-model-{uuid.uuid4().hex[:16]}"
         try:
             payload = encode_request(request)
             result, served_provider = await self._run_plan(
@@ -397,12 +401,43 @@ class ModelRouter:
                         request_id=request.request_id,
                     ),
                 )
-        except BaseException:
+        except BaseException as exc:
             if reservation is not None and self.meter is not None:
                 self.meter.release(reservation.reservation_id)
             self._stats["errors"] += 1
+            self._observe_panel_span(
+                trace_id=trace_id,
+                span_id=span_id,
+                ts=wall_started,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                stage="model",
+                component="model_gateway",
+                status="error",
+                model=request.model,
+                metadata={"task": request.task, "scenario": scenario, "provider": request.provider},
+                summary=f"模型调用失败: {type(exc).__name__}",
+            )
             raise
 
+        self._observe_panel_span(
+            trace_id=trace_id,
+            span_id=span_id,
+            ts=wall_started,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            stage="model",
+            component="model_gateway",
+            status="ok",
+            model=response.model or request.model,
+            input_tokens=response.usage.prompt_tokens,
+            output_tokens=response.usage.completion_tokens,
+            metadata={
+                "task": request.task,
+                "scenario": scenario,
+                "provider": request.provider,
+                "attempts": result.attempts,
+            },
+            summary="模型响应已归一化（仅记录元数据）",
+        )
         self._stats[request.task] = self._stats.get(request.task, 0) + 1
         self._stats["tokens"] = self._stats.get("tokens", 0) + response.usage.total_tokens
         if reservation is not None and self.meter is not None:
@@ -415,6 +450,15 @@ class ModelRouter:
             reserved=reservation.total if reservation else None,
         )
         return response
+
+    def _observe_panel_span(self, **fields: Any) -> None:
+        """可选的面板观测钩子；失败不能影响模型调用。"""
+        try:
+            from grouppig.panel.telemetry import record_span
+
+            record_span(**fields)
+        except Exception:  # noqa: BLE001
+            return
 
     # ---- 尝试计划（provider 分派与跨服务商降级） ------------------------
     def _attempt_plan(self, request: ModelRequest, spec: Mapping[str, Any]) -> list[tuple[str, str]]:
